@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+
+.env
+.env.*
+!.env.example
+
+src/generated/prisma/
+*.tsbuildinfo
+
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
