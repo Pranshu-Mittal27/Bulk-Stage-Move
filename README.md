@@ -1,6 +1,6 @@
 # bulk-stage-service
 
-An ESM-first NestJS and PostgreSQL foundation for an asynchronous bulk opportunity stage-move service. Business models and job-processing behavior are intentionally not included yet.
+An ESM-first NestJS and PostgreSQL service foundation, with the first workspace-scoped opportunity API milestone. Bulk-job processing, workers, queues, authentication, and UI are not included.
 
 ## Requirements
 
@@ -80,3 +80,83 @@ npm run db:studio
 ```
 
 The `db:check` command executes a read-only connectivity probe. `db:check`, migration, and Studio commands require a configured `DATABASE_URL`. Review schema changes before applying any migrations.
+
+## Opportunity API
+
+All routes are under `/api/v1` and require `X-Workspace-Id` containing an existing workspace UUID. This header scopes tenant data; it is not authentication. Responses use JSON, return monetary values as fixed-precision decimal strings, and errors use `{ "statusCode", "code", "message", "path", "timestamp" }`.
+
+### Create an opportunity
+
+`POST /api/v1/opportunities`
+
+```json
+{
+  "stageId": "54d73e72-03bc-4c20-859e-ad4996223cc6",
+  "ownerId": null,
+  "name": "Example opportunity",
+  "value": "12500.00",
+  "status": "open"
+}
+```
+
+`ownerId` is optional or null; `status` defaults to `open`. The name is trimmed and must not be empty. `value` must be a non-negative decimal string with at most 15 integer and 4 fractional digits. Creation returns `201` with the opportunity and creates its initial manual transition atomically.
+
+Example response:
+
+```json
+{
+  "id": "d4d74d8d-f924-4ce2-a67f-60a913a4d1aa",
+  "workspaceId": "c0f15139-f93f-4c8f-a03f-d56b67bef6c0",
+  "stageId": "54d73e72-03bc-4c20-859e-ad4996223cc6",
+  "ownerId": null,
+  "name": "Example opportunity",
+  "value": "12500.0000",
+  "status": "open",
+  "stageVersion": 1,
+  "createdAt": "2026-11-01T00:00:00.000Z",
+  "updatedAt": "2026-11-01T00:00:00.000Z"
+}
+```
+
+### List opportunities in a stage
+
+`GET /api/v1/opportunities?stageId=<uuid>&limit=50&cursor=<opaque-cursor>`
+
+`stageId` is required; `limit` defaults to 50 and must be 1–100. The response is ordered by opportunity ID and has this shape:
+
+```json
+{
+  "items": [],
+  "pagination": {
+    "limit": 50,
+    "nextCursor": null
+  }
+}
+```
+
+Follow `nextCursor` as the `cursor` query parameter until it is null.
+
+### Change stage
+
+`PATCH /api/v1/opportunities/<opportunity-id>/stage`
+
+```json
+{
+  "targetStageId": "e3f7aa35-a5dc-4a2d-baf7-839c817a0cd4",
+  "expectedStageVersion": 1
+}
+```
+
+The update is conditional on workspace, opportunity, current stage, and expected stage version. A successful move increments the version once and records one manual transition atomically. Repeating the current stage with the current version is a no-op. A stale version returns `409` with code `stage_version_conflict`; missing workspace-scoped resources return `404` with code `resource_not_found`. Invalid headers, IDs, query parameters, or bodies return `400` with code `validation_error`.
+
+The `200` response has the same opportunity resource shape shown above, with the destination `stageId` and incremented `stageVersion`.
+
+### API tests
+
+The end-to-end suite uses unique workspace fixtures in the configured PostgreSQL database and removes only those fixtures afterward. It does not reset the database. Configure `DATABASE_URL` and apply the reviewed migrations before running:
+
+```powershell
+npm run db:migrate:deploy
+npm test
+npm run test:e2e
+```
