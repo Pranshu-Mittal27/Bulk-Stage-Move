@@ -42,7 +42,7 @@ The check executes `SELECT 1`, reports configuration errors separately from conn
 
 The schema defines workspaces, workspace-owned stages, opportunities, append-only-at-the-application-level opportunity transition history, and durable bulk-job submission state. A bulk job stores its workspace-scoped idempotency key, canonical request, target stage, lifecycle/health state, progress counts, and lease/retry metadata. Its item rows snapshot each opportunity's expected stage and version and retain per-item outcomes. Composite foreign keys enforce workspace consistency across jobs, stages, opportunities, transitions, and snapshot items. Stage positions are unique within each workspace; opportunity values must be non-negative and stage versions positive. Job counts, lease generations, retry counts, item attempts, and snapshot stage versions are constrained in the database.
 
-Bulk-job schema is present, but submission APIs and workers are not implemented yet. Review the forward-only migration SQL before applying it, and only migrate a database confirmed to be a development target.
+The bulk-job schema is applied locally. Submission and status endpoints are documented below; a worker is not implemented. Review any forward-only migration SQL before applying it, and only migrate a database confirmed to be a development target.
 
 Review the generated SQL in `prisma/migrations` before applying schema changes. To apply pending migrations to a confirmed development database, run:
 
@@ -152,6 +152,75 @@ Follow `nextCursor` as the `cursor` query parameter until it is null.
 The update is conditional on workspace, opportunity, current stage, and expected stage version. A successful move increments the version once and records one manual transition atomically. Repeating the current stage with the current version is a no-op. A stale version returns `409` with code `stage_version_conflict`; missing workspace-scoped resources return `404` with code `resource_not_found`. Invalid headers, IDs, query parameters, or bodies return `400` with code `validation_error`.
 
 The `200` response has the same opportunity resource shape shown above, with the destination `stageId` and incremented `stageVersion`.
+
+## Bulk stage move submission and status
+
+These endpoints require `X-Workspace-Id` with an existing workspace UUID. Submission also requires an `Idempotency-Key`: it is trimmed, must contain 1–128 characters, and is unique within that workspace. This header is not authentication.
+
+### Submit a bulk stage move
+
+`POST /api/v1/bulk-stage-moves`
+
+```http
+X-Workspace-Id: c0f15139-f93f-4c8f-a03f-d56b67bef6c0
+Idempotency-Key: quarterly-stage-change-2026-01
+Content-Type: application/json
+```
+
+```json
+{
+  "targetStageId": "e3f7aa35-a5dc-4a2d-baf7-839c817a0cd4",
+  "filter": {
+    "stageId": "54d73e72-03bc-4c20-859e-ad4996223cc6",
+    "ownerId": "c1e79796-a640-4a02-a47b-6e5043d9816f",
+    "status": "open",
+    "valueRange": { "min": "100.00", "max": "5000.00" },
+    "createdAt": {
+      "from": "2026-01-01T00:00:00.000Z",
+      "to": "2026-02-01T00:00:00.000Z"
+    }
+  }
+}
+```
+
+The filter and each member are optional. Supplied predicates combine with AND. Monetary bounds are inclusive decimal strings (no exponent notation); `createdAt.from` is inclusive and `createdAt.to` is exclusive. Decimal bounds are canonicalized to four fractional digits; ISO-8601 timestamps (up to nanosecond input precision) are normalized to UTC at PostgreSQL's microsecond precision; UUIDs are lowercased; omitted filter members normalize to `null` in the canonical request. The SHA-256 canonical request includes API version, workspace, target stage, and normalized filters.
+
+The service counts and snapshots matching opportunity IDs, current stages, and stage versions in one PostgreSQL `REPEATABLE READ` transaction using set-based `INSERT ... SELECT`. Transaction acquisition waits at most 10 seconds, and a transaction is bounded to 60 seconds; the job is not visible until the complete snapshot commits. The maximum is 50,000 matching opportunities; larger requests return `422 validation_failed` without creating a job. Opportunities already at the target stage are included. Zero matches produce a completed job with zero counts and no items. No worker runs in this milestone.
+
+The first accepted request returns `202`; a repeated workspace/key with the same canonical request returns `200` and the existing job. Reusing the key for a different request returns `409 idempotency_key_reused`. A workspace-scoped unique constraint handles concurrent requests; the losing request compares the stored canonical request after the conflict.
+
+### Get bulk job status
+
+`GET /api/v1/bulk-stage-moves/<job-id>`
+
+The lookup is scoped by both workspace and job. Missing and cross-workspace jobs return `404 resource_not_found`. The response contains persisted job state, with `pendingCount = matchedCount - processedCount`; failure messages are returned as a safe generic message rather than exposing internal details. `waitingReason` is currently null because there is no worker/wait-state implementation.
+
+Example response:
+
+```json
+{
+  "id": "8eecb639-dda9-4ad3-b1f6-f91b39db45a0",
+  "status": "queued",
+  "health": "healthy",
+  "targetStageId": "e3f7aa35-a5dc-4a2d-baf7-839c817a0cd4",
+  "matchedCount": 2,
+  "processedCount": 0,
+  "movedCount": 0,
+  "skippedCount": 0,
+  "failedCount": 0,
+  "pendingCount": 2,
+  "createdAt": "2026-11-01T00:00:00.000Z",
+  "startedAt": null,
+  "completedAt": null,
+  "heartbeatAt": null,
+  "lastProgressAt": null,
+  "failureCode": null,
+  "failureMessage": null,
+  "waitingReason": null
+}
+```
+
+Invalid headers, keys, UUIDs, filter values, ranges, and timestamps return `400 validation_error`. A destination stage outside the workspace returns `404 resource_not_found`.
 
 ### API tests
 
