@@ -1,6 +1,6 @@
 # bulk-stage-service
 
-An ESM-first NestJS and PostgreSQL service foundation, with the first workspace-scoped opportunity API milestone. Bulk-job processing, workers, queues, authentication, and UI are not included.
+An ESM-first NestJS and PostgreSQL service with workspace-scoped opportunity APIs, durable bulk-job submission, and lease-management primitives. Background polling, item processing, authentication, and UI are not included.
 
 ## Requirements
 
@@ -42,7 +42,7 @@ The check executes `SELECT 1`, reports configuration errors separately from conn
 
 The schema defines workspaces, workspace-owned stages, opportunities, append-only-at-the-application-level opportunity transition history, and durable bulk-job submission state. A bulk job stores its workspace-scoped idempotency key, canonical request, target stage, lifecycle/health state, progress counts, and lease/retry metadata. Its item rows snapshot each opportunity's expected stage and version and retain per-item outcomes. Composite foreign keys enforce workspace consistency across jobs, stages, opportunities, transitions, and snapshot items. Stage positions are unique within each workspace; opportunity values must be non-negative and stage versions positive. Job counts, lease generations, retry counts, item attempts, and snapshot stage versions are constrained in the database.
 
-The bulk-job schema is applied locally. Submission and status endpoints are documented below; a worker is not implemented. Review any forward-only migration SQL before applying it, and only migrate a database confirmed to be a development target.
+The bulk-job schema is applied locally. Submission, status, and lease-management behavior are documented below; background polling and item processing are not implemented. Review any forward-only migration SQL before applying it, and only migrate a database confirmed to be a development target.
 
 Review the generated SQL in `prisma/migrations` before applying schema changes. To apply pending migrations to a confirmed development database, run:
 
@@ -221,6 +221,12 @@ Example response:
 ```
 
 Invalid headers, keys, UUIDs, filter values, ranges, and timestamps return `400 validation_error`. A destination stage outside the workspace returns `404 resource_not_found`.
+
+### Lease-management service
+
+The internal `BulkJobLeaseService` provides `claimNext(workerId)` and `renew(token)` for a future worker process. Claims atomically select one due queued job or one running job with an expired lease using PostgreSQL row locking and database time. A successful claim sets status to `running`, assigns the owner and expiry, updates the heartbeat, and increments `leaseGeneration`; `startedAt` is set only once. Renewal succeeds only while the matching job ID, owner, generation, running status, and unexpired lease still match. A stale token returns `{ "kind": "lease_lost" }`; no eligible job returns `{ "kind": "empty" }`.
+
+The caller supplies a stable worker ID; the service does not generate one. `BULK_JOB_LEASE_DURATION_MS` configures lease duration, defaulting to 30,000 milliseconds and accepting values from 1,000 through 300,000 milliseconds. Claims and renewals use PostgreSQL time. The fencing token protects lease ownership only: any future item-processing transaction must independently validate the token before committing opportunity or item changes. This service does not poll, process items, update progress, or complete jobs.
 
 ### API tests
 

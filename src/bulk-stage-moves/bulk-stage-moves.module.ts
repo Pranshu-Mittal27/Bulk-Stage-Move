@@ -1,11 +1,13 @@
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '../database/database.module.js';
+import { BulkJobLeaseService } from './bulk-job-lease.service.js';
 import { BulkStageMovesController } from './bulk-stage-moves.controller.js';
 import { BulkStageMovesService } from './bulk-stage-moves.service.js';
 
 @Module({
   imports: [DatabaseModule],
   controllers: [BulkStageMovesController],
-  providers: [BulkStageMovesService],
+  providers: [BulkJobLeaseService, BulkStageMovesService],
+  exports: [BulkJobLeaseService],
 })
 export class BulkStageMovesModule {}
