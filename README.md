@@ -36,7 +36,19 @@ An ESM-first NestJS and PostgreSQL foundation for an asynchronous bulk opportuni
    npm run db:check
    ```
 
-The check executes `SELECT 1`, reports configuration errors separately from connection failures, and closes the Prisma client. The Prisma schema contains no models yet; setup and connectivity checks do not run migrations or change database contents.
+The check executes `SELECT 1`, reports configuration errors separately from connection failures, and closes the Prisma client. It does not apply migrations or change database contents.
+
+## Core data model
+
+The initial schema defines workspaces, workspace-owned stages, opportunities, and append-only-at-the-application-level opportunity transition history. Composite foreign keys enforce that an opportunity and each transition's stages belong to the same workspace. Stage positions are unique within each workspace; opportunity values must be non-negative and stage versions positive.
+
+Review the generated SQL in `prisma/migrations` before applying schema changes. To apply pending migrations to a confirmed development database, run:
+
+```powershell
+npm run db:migrate:dev
+```
+
+For a deployment environment, use the reviewed migrations with `npm run db:migrate:deploy`. These commands change the database schema; do not run them against a database until its target and contents are confirmed.
 
 ## Development
 

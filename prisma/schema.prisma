@@ -7,3 +7,76 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+enum OpportunityStatus {
+  open
+  won
+  lost
+  abandoned
+}
+
+enum TransitionSource {
+  manual
+  bulk
+}
+
+model Workspace {
+  id            String                  @id @default(uuid()) @db.Uuid
+  name          String
+  createdAt     DateTime                @default(now()) @db.Timestamptz(6)
+  stages        Stage[]
+  opportunities Opportunity[]
+  transitions   OpportunityTransition[]
+}
+
+model Stage {
+  id             String                  @id @default(uuid()) @db.Uuid
+  workspaceId    String                  @db.Uuid
+  name           String
+  position       Int
+  createdAt      DateTime                @default(now()) @db.Timestamptz(6)
+  workspace      Workspace               @relation(fields: [workspaceId], references: [id])
+  opportunities  Opportunity[]           @relation("OpportunityStage")
+  sourceFor      OpportunityTransition[] @relation("TransitionSourceStage")
+  destinationFor OpportunityTransition[] @relation("TransitionDestinationStage")
+
+  @@unique([workspaceId, position])
+  @@unique([workspaceId, id])
+}
+
+model Opportunity {
+  id           String                  @id @default(uuid()) @db.Uuid
+  workspaceId  String                  @db.Uuid
+  stageId      String                  @db.Uuid
+  ownerId      String?                 @db.Uuid
+  name         String
+  value        Decimal                 @default(0) @db.Decimal(19, 4)
+  status       OpportunityStatus       @default(open)
+  stageVersion Int                     @default(1)
+  createdAt    DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime                @updatedAt @db.Timestamptz(6)
+  workspace    Workspace               @relation(fields: [workspaceId], references: [id])
+  stage        Stage                   @relation("OpportunityStage", fields: [workspaceId, stageId], references: [workspaceId, id])
+  transitions  OpportunityTransition[]
+
+  @@unique([workspaceId, id])
+  @@index([workspaceId, stageId, id])
+  @@index([workspaceId, ownerId, status, id])
+}
+
+model OpportunityTransition {
+  id            String           @id @default(uuid()) @db.Uuid
+  workspaceId   String           @db.Uuid
+  opportunityId String           @db.Uuid
+  fromStageId   String?          @db.Uuid
+  toStageId     String           @db.Uuid
+  source        TransitionSource
+  operationId   String?          @db.Uuid
+  createdAt     DateTime         @default(now()) @db.Timestamptz(6)
+  workspace     Workspace        @relation(fields: [workspaceId], references: [id])
+  opportunity   Opportunity      @relation(fields: [workspaceId, opportunityId], references: [workspaceId, id])
+  fromStage     Stage?           @relation("TransitionSourceStage", fields: [workspaceId, fromStageId], references: [workspaceId, id])
+  toStage       Stage            @relation("TransitionDestinationStage", fields: [workspaceId, toStageId], references: [workspaceId, id])
+
+  @@index([workspaceId, opportunityId, createdAt])
+}
