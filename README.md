@@ -40,7 +40,9 @@ The check executes `SELECT 1`, reports configuration errors separately from conn
 
 ## Core data model
 
-The initial schema defines workspaces, workspace-owned stages, opportunities, and append-only-at-the-application-level opportunity transition history. Composite foreign keys enforce that an opportunity and each transition's stages belong to the same workspace. Stage positions are unique within each workspace; opportunity values must be non-negative and stage versions positive.
+The schema defines workspaces, workspace-owned stages, opportunities, append-only-at-the-application-level opportunity transition history, and durable bulk-job submission state. A bulk job stores its workspace-scoped idempotency key, canonical request, target stage, lifecycle/health state, progress counts, and lease/retry metadata. Its item rows snapshot each opportunity's expected stage and version and retain per-item outcomes. Composite foreign keys enforce workspace consistency across jobs, stages, opportunities, transitions, and snapshot items. Stage positions are unique within each workspace; opportunity values must be non-negative and stage versions positive. Job counts, lease generations, retry counts, item attempts, and snapshot stage versions are constrained in the database.
+
+Bulk-job schema is present, but submission APIs and workers are not implemented yet. Review the forward-only migration SQL before applying it, and only migrate a database confirmed to be a development target.
 
 Review the generated SQL in `prisma/migrations` before applying schema changes. To apply pending migrations to a confirmed development database, run:
 

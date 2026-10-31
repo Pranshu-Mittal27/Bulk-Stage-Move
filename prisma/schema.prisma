@@ -20,6 +20,28 @@ enum TransitionSource {
   bulk
 }
 
+enum BulkJobStatus {
+  queued
+  running
+  recovering
+  completed
+  completed_with_errors
+  failed
+}
+
+enum BulkJobHealthStatus {
+  healthy
+  slow
+  stuck
+}
+
+enum BulkJobItemStatus {
+  pending
+  moved
+  skipped
+  failed
+}
+
 model Workspace {
   id            String                  @id @default(uuid()) @db.Uuid
   name          String
@@ -27,6 +49,8 @@ model Workspace {
   stages        Stage[]
   opportunities Opportunity[]
   transitions   OpportunityTransition[]
+  bulkJobs      BulkJob[]
+  bulkJobItems  BulkJobItem[]
 }
 
 model Stage {
@@ -39,6 +63,8 @@ model Stage {
   opportunities  Opportunity[]           @relation("OpportunityStage")
   sourceFor      OpportunityTransition[] @relation("TransitionSourceStage")
   destinationFor OpportunityTransition[] @relation("TransitionDestinationStage")
+  bulkJobTargets BulkJob[]               @relation("BulkJobTargetStage")
+  bulkJobItems   BulkJobItem[]           @relation("BulkJobItemExpectedStage")
 
   @@unique([workspaceId, position])
   @@unique([workspaceId, id])
@@ -58,6 +84,7 @@ model Opportunity {
   workspace    Workspace               @relation(fields: [workspaceId], references: [id])
   stage        Stage                   @relation("OpportunityStage", fields: [workspaceId, stageId], references: [workspaceId, id])
   transitions  OpportunityTransition[]
+  bulkJobItems BulkJobItem[]
 
   @@unique([workspaceId, id])
   @@index([workspaceId, stageId, id])
@@ -77,6 +104,70 @@ model OpportunityTransition {
   opportunity   Opportunity      @relation(fields: [workspaceId, opportunityId], references: [workspaceId, id])
   fromStage     Stage?           @relation("TransitionSourceStage", fields: [workspaceId, fromStageId], references: [workspaceId, id])
   toStage       Stage            @relation("TransitionDestinationStage", fields: [workspaceId, toStageId], references: [workspaceId, id])
+  operation     BulkJob?         @relation(fields: [workspaceId, operationId], references: [workspaceId, id])
 
   @@index([workspaceId, opportunityId, createdAt])
+}
+
+model BulkJob {
+  id                   String                  @id @default(uuid()) @db.Uuid
+  workspaceId          String                  @db.Uuid
+  idempotencyKey       String
+  canonicalRequestHash String
+  normalizedRequest    Json
+  targetStageId        String                  @db.Uuid
+  status               BulkJobStatus           @default(queued)
+  healthStatus         BulkJobHealthStatus     @default(healthy)
+  matchedCount         Int                     @default(0)
+  processedCount       Int                     @default(0)
+  movedCount           Int                     @default(0)
+  skippedCount         Int                     @default(0)
+  failedCount          Int                     @default(0)
+  cursorItemId         BigInt?
+  leaseOwner           String?
+  leaseExpiresAt       DateTime?               @db.Timestamptz(6)
+  leaseGeneration      Int                     @default(0)
+  heartbeatAt          DateTime?               @db.Timestamptz(6)
+  lastProgressAt       DateTime?               @db.Timestamptz(6)
+  retryCount           Int                     @default(0)
+  nextAttemptAt        DateTime?               @db.Timestamptz(6)
+  failureCode          String?
+  failureMessage       String?
+  startedAt            DateTime?               @db.Timestamptz(6)
+  completedAt          DateTime?               @db.Timestamptz(6)
+  createdAt            DateTime                @default(now()) @db.Timestamptz(6)
+  workspace            Workspace               @relation(fields: [workspaceId], references: [id])
+  targetStage          Stage                   @relation("BulkJobTargetStage", fields: [workspaceId, targetStageId], references: [workspaceId, id])
+  items                BulkJobItem[]           @relation("BulkJobItems")
+  cursorItem           BulkJobItem?            @relation("BulkJobCursor", fields: [id, cursorItemId], references: [jobId, itemId])
+  transitions          OpportunityTransition[]
+
+  @@unique([workspaceId, id])
+  @@unique([workspaceId, idempotencyKey])
+  @@index([status, nextAttemptAt, createdAt])
+  @@index([status, leaseExpiresAt])
+}
+
+model BulkJobItem {
+  itemId               BigInt            @id @default(autoincrement())
+  jobId                String            @db.Uuid
+  workspaceId          String            @db.Uuid
+  opportunityId        String            @db.Uuid
+  expectedStageId      String            @db.Uuid
+  expectedStageVersion Int
+  status               BulkJobItemStatus @default(pending)
+  attemptCount         Int               @default(0)
+  nextAttemptAt        DateTime?         @db.Timestamptz(6)
+  outcomeReason        String?
+  lastErrorCode        String?
+  processedAt          DateTime?         @db.Timestamptz(6)
+  workspace            Workspace         @relation(fields: [workspaceId], references: [id])
+  job                  BulkJob           @relation("BulkJobItems", fields: [workspaceId, jobId], references: [workspaceId, id])
+  opportunity          Opportunity       @relation(fields: [workspaceId, opportunityId], references: [workspaceId, id])
+  expectedStage        Stage             @relation("BulkJobItemExpectedStage", fields: [workspaceId, expectedStageId], references: [workspaceId, id])
+  cursorFor            BulkJob[]         @relation("BulkJobCursor")
+
+  @@unique([jobId, opportunityId])
+  @@unique([jobId, itemId])
+  @@index([jobId, status, nextAttemptAt, itemId])
 }
