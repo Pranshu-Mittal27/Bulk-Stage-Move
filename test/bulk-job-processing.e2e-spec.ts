@@ -891,6 +891,12 @@ describe('Bulk job batch processing (e2e)', () => {
       movedCount: 1,
       status: BulkJobStatus.running,
     });
+    await prisma.$executeRaw`
+      UPDATE "BulkJobItem"
+      SET "nextAttemptAt" = clock_timestamp() - INTERVAL '1 second'
+      WHERE "jobId" = ${fixture.jobId}::uuid
+        AND "status" = 'pending'::"BulkJobItemStatus"
+    `;
     const reclaimed = await leases.claimNext('reclaimer');
     expect(reclaimed.kind).toBe('claimed');
     if (reclaimed.kind !== 'claimed') {

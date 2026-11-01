@@ -15,12 +15,14 @@ import type { WorkerConfig } from './worker.config.js';
 
 const maximumClaimBackoffMs = 30_000;
 const jitterRatio = 0.2;
+const anomalyDiagnosticIntervalMs = 60_000;
 
 @Injectable()
 export class BulkJobWorkerService {
   private readonly logger = new Logger(BulkJobWorkerService.name);
   private readonly shutdownController = new AbortController();
   private shutdownRequested = false;
+  private lastAnomalyDiagnosticAt = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly leases: BulkJobLeaseService,
@@ -42,6 +44,11 @@ export class BulkJobWorkerService {
     this.log('worker_started');
 
     while (!this.shutdownRequested) {
+      await this.runAnomalyDiagnosticIfDue();
+      if (this.shutdownRequested) {
+        break;
+      }
+
       let claim: ClaimBulkJobResult;
       try {
         claim = await this.leases.claimNext(this.config.workerId);
@@ -84,6 +91,11 @@ export class BulkJobWorkerService {
     let lastRenewalAt = performance.now();
 
     while (!this.shutdownRequested) {
+      await this.runAnomalyDiagnosticIfDue();
+      if (this.shutdownRequested) {
+        return;
+      }
+
       let result: ProcessBulkJobBatchResult;
       try {
         result = await this.processing.processBatch(token);
@@ -136,37 +148,83 @@ export class BulkJobWorkerService {
         ) {
           return;
         }
-      } else {
-        this.log('no_due_pending_items', { jobId: token.jobId });
-      }
-
-      if (this.shutdownRequested) {
-        return;
-      }
-      if (
-        result.kind === 'processed' ||
-        this.shouldRenew(lastRenewalAt, renewalIntervalMs)
-      ) {
-        const renewed = await this.renew(token);
-        if (!renewed) {
-          return;
-        }
-        lastRenewalAt = performance.now();
-      }
-
-      if (result.kind === 'no_due_pending_items') {
-        await this.waitWithJitter(this.config.pollIntervalMs);
         if (this.shutdownRequested) {
           return;
         }
-        if (this.shouldRenew(lastRenewalAt, renewalIntervalMs)) {
+        if (
+          result.kind === 'processed' ||
+          this.shouldRenew(lastRenewalAt, renewalIntervalMs)
+        ) {
           const renewed = await this.renew(token);
           if (!renewed) {
             return;
           }
           lastRenewalAt = performance.now();
         }
+        continue;
       }
+
+      this.log('no_due_pending_items', { jobId: token.jobId });
+      let deferral: Awaited<
+        ReturnType<BulkJobLeaseService['deferIfNoDueItems']>
+      >;
+      try {
+        deferral = await this.leases.deferIfNoDueItems(token);
+      } catch (error) {
+        this.log('job_deferral_failed', {
+          jobId: token.jobId,
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+        });
+        await this.waitWithJitter(this.config.pollIntervalMs);
+        return;
+      }
+
+      if (deferral.kind === 'deferred') {
+        this.log('job_deferred', { jobId: token.jobId });
+        return;
+      }
+      if (deferral.kind === 'lease_lost') {
+        this.log('lease_lost', { jobId: token.jobId, operation: 'defer' });
+        return;
+      }
+      if (deferral.kind === 'no_pending_items') {
+        this.logWarning('job_has_no_pending_items', { jobId: token.jobId });
+        return;
+      }
+
+      this.log('due_items_remain', { jobId: token.jobId });
+      await this.waitWithJitter(this.config.pollIntervalMs);
+      if (this.shutdownRequested) {
+        return;
+      }
+      if (this.shouldRenew(lastRenewalAt, renewalIntervalMs)) {
+        const renewed = await this.renew(token);
+        if (!renewed) {
+          return;
+        }
+        lastRenewalAt = performance.now();
+      }
+    }
+  }
+
+  private async runAnomalyDiagnosticIfDue(): Promise<void> {
+    const now = performance.now();
+    if (now - this.lastAnomalyDiagnosticAt < anomalyDiagnosticIntervalMs) {
+      return;
+    }
+    this.lastAnomalyDiagnosticAt = now;
+
+    try {
+      const jobs = await this.leases.findJobsWithoutPendingItems();
+      if (jobs.length > 0) {
+        this.logWarning('jobs_without_pending_items', {
+          jobs: jobs.map(({ id, status }) => ({ id, status })),
+        });
+      }
+    } catch (error) {
+      this.logError('job_anomaly_diagnostic_failed', {
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      });
     }
   }
 
@@ -217,6 +275,21 @@ export class BulkJobWorkerService {
 
   private log(event: string, fields: Record<string, unknown> = {}): void {
     this.logger.log(
+      JSON.stringify({ event, workerId: this.config.workerId, ...fields }),
+    );
+  }
+
+  private logWarning(
+    event: string,
+    fields: Record<string, unknown> = {},
+  ): void {
+    this.logger.warn(
+      JSON.stringify({ event, workerId: this.config.workerId, ...fields }),
+    );
+  }
+
+  private logError(event: string, fields: Record<string, unknown> = {}): void {
+    this.logger.error(
       JSON.stringify({ event, workerId: this.config.workerId, ...fields }),
     );
   }

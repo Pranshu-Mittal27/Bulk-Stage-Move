@@ -6,6 +6,7 @@ import {
   it,
   jest,
 } from '@jest/globals';
+import type { Logger } from '@nestjs/common';
 import { performance } from 'node:perf_hooks';
 import { BulkJobLeaseService } from '../bulk-stage-moves/bulk-job-lease.service.js';
 import {
@@ -64,6 +65,8 @@ describe('BulkJobWorkerService', () => {
     leases = {
       claimNext: jest.fn(),
       renew: jest.fn(),
+      deferIfNoDueItems: jest.fn(),
+      findJobsWithoutPendingItems: jest.fn(),
     } as unknown as jest.Mocked<BulkJobLeaseService>;
     processing = {
       processBatch: jest.fn(),
@@ -73,6 +76,7 @@ describe('BulkJobWorkerService', () => {
       leaseExpiresAt: new Date(),
       heartbeatAt: new Date(),
     });
+    leases.findJobsWithoutPendingItems.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -217,6 +221,116 @@ describe('BulkJobWorkerService', () => {
     expect(leases.renew).not.toHaveBeenCalled();
   });
 
+  it('discards a deferred token and returns to claim polling', async () => {
+    leases.claimNext
+      .mockResolvedValueOnce(claimed)
+      .mockImplementationOnce(async () => {
+        worker.requestShutdown();
+        return { kind: 'empty' };
+      });
+    processing.processBatch.mockResolvedValueOnce({
+      kind: 'no_due_pending_items',
+    });
+    leases.deferIfNoDueItems.mockResolvedValueOnce({ kind: 'deferred' });
+    worker = new BulkJobWorkerService(leases, processing, config);
+
+    await worker.run();
+
+    expect(leases.deferIfNoDueItems).toHaveBeenCalledWith(token);
+    expect(leases.claimNext).toHaveBeenCalledTimes(2);
+    expect(processing.processBatch).toHaveBeenCalledTimes(1);
+    expect(leases.renew).not.toHaveBeenCalled();
+  });
+
+  it('waits after due items remain instead of immediately retrying batches', async () => {
+    leases.claimNext.mockResolvedValueOnce(claimed);
+    processing.processBatch
+      .mockResolvedValueOnce({ kind: 'no_due_pending_items' })
+      .mockImplementationOnce(async () => {
+        worker.requestShutdown();
+        return processed(BulkJobStatus.completed);
+      });
+    leases.deferIfNoDueItems.mockResolvedValueOnce({
+      kind: 'due_items_remain',
+    });
+    worker = new BulkJobWorkerService(leases, processing, config);
+
+    const running = worker.run();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(processing.processBatch).toHaveBeenCalledTimes(1);
+    expect(leases.renew).not.toHaveBeenCalled();
+
+    await jest.advanceTimersByTimeAsync(config.pollIntervalMs - 1);
+    expect(processing.processBatch).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(1);
+    await running;
+
+    expect(processing.processBatch).toHaveBeenCalledTimes(2);
+    expect(leases.deferIfNoDueItems).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['lease_lost', 'no_pending_items'] as const)(
+    'does not reuse the token when deferral returns %s',
+    async (kind) => {
+      leases.claimNext
+        .mockResolvedValueOnce(claimed)
+        .mockImplementationOnce(async () => {
+          worker.requestShutdown();
+          return { kind: 'empty' };
+        });
+      processing.processBatch.mockResolvedValueOnce({
+        kind: 'no_due_pending_items',
+      });
+      leases.deferIfNoDueItems.mockResolvedValueOnce({ kind });
+      worker = new BulkJobWorkerService(leases, processing, config);
+      const warning = jest.spyOn(
+        (worker as unknown as { logger: Logger }).logger,
+        'warn',
+      );
+
+      await worker.run();
+
+      expect(processing.processBatch).toHaveBeenCalledTimes(1);
+      expect(leases.renew).not.toHaveBeenCalled();
+      expect(leases.claimNext).toHaveBeenCalledTimes(2);
+      if (kind === 'no_pending_items') {
+        expect(warning).toHaveBeenCalledWith(
+          expect.stringContaining('job_has_no_pending_items'),
+        );
+      }
+    },
+  );
+
+  it('backs off and discards the token after an ambiguous deferral error', async () => {
+    leases.claimNext
+      .mockResolvedValueOnce(claimed)
+      .mockImplementationOnce(async () => {
+        worker.requestShutdown();
+        return { kind: 'empty' };
+      });
+    processing.processBatch.mockResolvedValueOnce({
+      kind: 'no_due_pending_items',
+    });
+    leases.deferIfNoDueItems.mockRejectedValueOnce(
+      new Error('connection lost during commit'),
+    );
+    worker = new BulkJobWorkerService(leases, processing, config);
+
+    const running = worker.run();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(leases.claimNext).toHaveBeenCalledTimes(1);
+    expect(processing.processBatch).toHaveBeenCalledTimes(1);
+    expect(leases.renew).not.toHaveBeenCalled();
+
+    await jest.advanceTimersByTimeAsync(config.pollIntervalMs);
+    await running;
+
+    expect(leases.deferIfNoDueItems).toHaveBeenCalledTimes(1);
+    expect(leases.claimNext).toHaveBeenCalledTimes(2);
+    expect(processing.processBatch).toHaveBeenCalledTimes(1);
+    expect(leases.renew).not.toHaveBeenCalled();
+  });
+
   it('stops a job when renewal fails', async () => {
     leases.claimNext.mockResolvedValueOnce(claimed);
     processing.processBatch.mockResolvedValueOnce(
@@ -284,6 +398,7 @@ describe('BulkJobWorkerService', () => {
     processing.processBatch.mockResolvedValue({
       kind: 'no_due_pending_items',
     });
+    leases.deferIfNoDueItems.mockResolvedValue({ kind: 'due_items_remain' });
     leases.renew.mockImplementationOnce(async () => {
       worker.requestShutdown();
       return {
@@ -304,5 +419,60 @@ describe('BulkJobWorkerService', () => {
 
     expect(leases.renew).toHaveBeenCalledTimes(1);
     expect(processing.processBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('throttles the read-only anomaly diagnostic to once per minute', async () => {
+    jest.spyOn(performance, 'now').mockImplementation(() => jest.now());
+    leases.claimNext
+      .mockResolvedValueOnce({ kind: 'empty' })
+      .mockImplementationOnce(async () => {
+        worker.requestShutdown();
+        return { kind: 'empty' };
+      });
+    leases.findJobsWithoutPendingItems.mockResolvedValueOnce([
+      { id: token.jobId, status: BulkJobStatus.queued },
+    ]);
+    worker = new BulkJobWorkerService(leases, processing, {
+      ...config,
+      pollIntervalMs: 60_000,
+    });
+    const warning = jest.spyOn(
+      (worker as unknown as { logger: Logger }).logger,
+      'warn',
+    );
+
+    const running = worker.run();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(leases.findJobsWithoutPendingItems).toHaveBeenCalledTimes(1);
+
+    await jest.advanceTimersByTimeAsync(60_000);
+    await running;
+    expect(leases.findJobsWithoutPendingItems).toHaveBeenCalledTimes(2);
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining(token.jobId));
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining('"status":"queued"'),
+    );
+  });
+
+  it('logs diagnostic query failures without stopping claim polling', async () => {
+    leases.findJobsWithoutPendingItems.mockRejectedValueOnce(
+      new Error('diagnostic database error'),
+    );
+    leases.claimNext.mockImplementationOnce(async () => {
+      worker.requestShutdown();
+      return { kind: 'empty' };
+    });
+    worker = new BulkJobWorkerService(leases, processing, config);
+    const errorLog = jest.spyOn(
+      (worker as unknown as { logger: Logger }).logger,
+      'error',
+    );
+
+    await worker.run();
+
+    expect(leases.claimNext).toHaveBeenCalledTimes(1);
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining('job_anomaly_diagnostic_failed'),
+    );
   });
 });
