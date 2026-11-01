@@ -2,7 +2,51 @@
 
 ## Status
 
-**Measured results: Not measured yet.** This document describes the reproducible procedure and provides fields for results. Do not treat example commands as completed measurements.
+**Measured results: Initial local measurements recorded below.** These are one run per scenario on one local workstation, not evidence of production capacity or a general exactly-once guarantee. The JSON files listed in the result tables are the detailed source records.
+
+## Measured results
+
+### Environment and dataset
+
+| Field                      | Recorded value                                                       |
+| -------------------------- | -------------------------------------------------------------------- |
+| Operating system / shell   | Windows, PowerShell                                                  |
+| CPU                        | 13th Gen Intel Core i5-1335U; 10 cores, 12 logical processors        |
+| RAM                        | 15.69 GB                                                             |
+| Node.js / npm              | v22.23.4 / 10.9.9                                                    |
+| PostgreSQL                 | 18.6, local server                                                   |
+| Dataset                    | 515,000 opportunities across 6 workspaces                            |
+| Large workspace            | 500,000 opportunities across 12 uneven stages                        |
+| Small workspaces           | 2,000; 2,500; 3,000; 3,500; and 4,000 opportunities                  |
+| Interactive probe settings | 2 requests/second per workspace; maximum concurrency 1 per workspace |
+
+The harness JSON independently records Windows, the CPU model, 12 logical processors, and Node.js v22.23.4. RAM, npm version, PostgreSQL version, core count, and dataset totals are the confirmed environment details supplied for this run, not fields recorded by the harness.
+
+### Interactive latency
+
+Values below are milliseconds. The delta is during-bulk minus baseline; the scenarios have different measurement durations and only one run each.
+
+| Workspace | Baseline requests / errors |    Baseline p50 / p95 / p99 | During-bulk requests / errors | During-bulk p50 / p95 / p99 | p95 change |  p99 change |
+| --------- | -------------------------: | --------------------------: | ----------------------------: | --------------------------: | ---------: | ----------: |
+| Large     |                    241 / 0 | 12.8678 / 20.7903 / 34.2015 |                     1,120 / 0 | 15.1596 / 22.6175 / 51.2030 | +1.8272 ms | +17.0015 ms |
+| Small     |                    241 / 0 | 13.1761 / 19.1348 / 29.1701 |                     1,119 / 0 | 14.1559 / 20.4774 / 28.6761 | +1.3426 ms |  -0.4940 ms |
+
+The large-workspace p95 and p99 were higher during this bulk run; the small-workspace p95 was higher while its p99 was slightly lower. These are observed values from one run, not evidence of a stable causal effect or a production latency guarantee.
+
+### Bulk and crash/recovery outcomes
+
+| Scenario / source JSON                                               | Outcome and counters                                                                                                                                                                                                                              | Timing and throughput                                                                                                                                                                                                       |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Baseline — `benchmarks/baseline.json`                                | Both workspaces had zero request errors.                                                                                                                                                                                                          | Interactive measurement: 120.047 s (about 120.05 s).                                                                                                                                                                        |
+| During bulk — `benchmarks/during-bulk.json`                          | `completed`; 50,000 matched, processed, and moved; 0 skipped, 0 failed, 0 pending.                                                                                                                                                                | Submission: 1,798.14 ms. Total completion elapsed: 559.498 s. Interactive measurement: 559.528 s. Persisted job interval: 556.768 s; persisted throughput: 89.804 processed outcomes/s and 89.804 moved opportunities/s.    |
+| Crash start — `benchmarks/crash-start-2026-11-01T20-08-19.103Z.json` | At the prompt, the earlier `progressImmediatelyBeforeStop` snapshot was 100/50,000. After the operator confirmed the worker had stopped, the fresh `progressAtStop` snapshot was 15,300 processed and moved, 0 skipped or failed, 34,700 pending. | Submission: 2,250.58 ms.                                                                                                                                                                                                    |
+| Crash resume — `benchmarks/crash-recovery.json`                      | `PASS`; final job `completed` with 50,000 matched, processed, and moved; 0 skipped, 0 failed, 0 pending. At restart confirmation, the persisted baseline was 18,100 processed.                                                                    | Persisted job interval: 503.190 s; persisted throughput: 99.366 processed outcomes/s and 99.366 moved opportunities/s. Restart-confirmation to observed progress: 1,173 ms. Submitted-to-completion observation: 506.390 s. |
+
+The crash/recovery procedure was operator-attested: the worker was manually stopped and restarted while the API and PostgreSQL remained running. The harness records progress snapshots and requires a post-restart increase beyond its fresh baseline, but does not independently verify which OS process advanced the job.
+
+The reported throughput values are **persisted end-to-end job rates**, calculated from final persisted counters divided by the persisted `completedAt - startedAt` interval. They are not isolated worker processing rates: the interval can include lifecycle, retry/deferred, and—during recovery—interruption time. No measurement here separates application processing time from database time.
+
+These results show the recorded job counters reached their expected terminal values in these runs. They do not prove exactly-once processing beyond the API-visible status/counter invariants, nor do they establish production-scale capacity.
 
 ## Prerequisites and setup
 
@@ -85,7 +129,7 @@ Reported bulk timings:
 
 The crash-start output includes `progressImmediatelyBeforeStop`, progress after stop confirmation, and the corresponding observation timestamps. Crash-resume includes the fresh persisted restart-confirmation baseline, `restartConfirmationToObservedProgressMs`, final counters/status, and total submitted-to-completion UTC wall-clock time. Cross-process wall-clock duration may be affected by clock changes and includes operator delay. Recovery evidence is operator-attested and does not prove which OS process advanced the job. Correctness is limited to the status/counter invariants exposed by the API; no per-item audit endpoint is exposed by this harness.
 
-HTTP status failures and transport failures are counted separately for interactive requests. Bulk submission/status failures are reported as run failures; response bodies are not emitted except for a validated short API error code. JSON output contains only the base URL origin and non-secret runtime hardware metadata; it never includes `DATABASE_URL`, credentials, or tokens.
+HTTP status failures and transport failures are counted separately for interactive requests. Bulk submission/status failures are reported as run failures; response bodies are not emitted except for a validated short API error code. Benchmark JSON does not include database credentials or connection strings. It can include scenario metadata, workspace and job IDs, counters, workload details, and, for crash-start output, a local checkpoint path.
 
 ## Configuration
 
@@ -111,42 +155,25 @@ CLI values override environment variables. IDs default to the deterministic assi
 
 Use `npm run benchmark:bulk -- --help` for the CLI summary. Base URLs with credentials, paths, query strings, or fragments are rejected. Only the URL origin is written to results.
 
-## Result template
-
-Fill in this section only after running the documented procedure. Preserve the generated JSON output with the submission if required.
-
-| Measurement                                       | Result           |
-| ------------------------------------------------- | ---------------- |
-| Baseline JSON                                     | Not measured yet |
-| During-bulk JSON                                  | Not measured yet |
-| Crash-recovery JSON                               | Not measured yet |
-| 50,000-item wall-clock completion                 | Not measured yet |
-| Submission latency                                | Not measured yet |
-| Processed outcomes / persisted wall-clock second  | Not measured yet |
-| Moved opportunities / persisted wall-clock second | Not measured yet |
-| Large-workspace interactive p50 / p95 / p99       | Not measured yet |
-| Small-workspace interactive p50 / p95 / p99       | Not measured yet |
-| Restart-confirmation-to-observed-progress time    | Not measured yet |
-| Crash submitted-to-completed time                 | Not measured yet |
-
 ## Hardware and PostgreSQL record
 
-The harness records client OS/platform, architecture, Node version, CPU model, and logical CPU count when available. It cannot safely infer server hardware or PostgreSQL configuration. Record those manually for each result:
+The harness records client OS/platform, architecture, Node version, CPU model, and logical CPU count when available. PostgreSQL version and local-server status are user-confirmed. CPU/RAM utilization, PostgreSQL settings, connection usage, and separate API/database hardware utilization were not measured. The local single-machine test does not validate production deployment characteristics.
 
-| Field                                                            | Value            |
-| ---------------------------------------------------------------- | ---------------- |
-| Benchmark client CPU / RAM                                       | Not measured yet |
-| API server CPU / RAM                                             | Not measured yet |
-| PostgreSQL server CPU / RAM / storage                            | Not measured yet |
-| PostgreSQL version                                               | Not measured yet |
-| PostgreSQL configuration (connections, memory, storage settings) | Not measured yet |
-| Node.js version and worker configuration                         | Not measured yet |
-| Database size and seed verification                              | Not measured yet |
-| Request rate / concurrency / run duration                        | Not measured yet |
+| Field                              | Recorded value                                                                  |
+| ---------------------------------- | ------------------------------------------------------------------------------- |
+| Benchmark client CPU / RAM         | 13th Gen Intel Core i5-1335U; 15.69 GB RAM                                      |
+| API / PostgreSQL deployment        | Local single-machine run; separate resource utilization not measured            |
+| PostgreSQL version / configuration | 18.6; configuration and utilization not recorded                                |
+| Node.js / npm                      | v22.23.4 / 10.9.9                                                               |
+| Dataset                            | 515,000 opportunities across 6 workspaces, as confirmed for this run            |
+| Request rate / concurrency         | 2 requests/second/workspace; max concurrency 1/workspace                        |
+| Run count                          | One baseline, one during-bulk run, and one operator-attested crash/recovery run |
 
 ## Limitations
 
-- No benchmark has been run or performance result measured yet.
+- These are single-run local measurements; there are no repeated runs, confidence intervals, or production-environment validation.
+- CPU/RAM utilization was not measured, and the harness does not record PostgreSQL configuration or execution plans.
+- The configured probe rate/concurrency is low and fixed; results do not characterize higher-load behavior or all API routes.
 - Client-side latency includes local scheduling and network effects; the two workspace samples share one client process and are not independent load generators.
 - There is no warm-up period. Connection establishment and connection reuse can influence early and subsequent latency samples.
 - The default interaction probes use the same low-rate GET workload and page size; they do not represent every API route or a production traffic mix.

@@ -1,0 +1,55 @@
+{
+  "generatedAt": "2026-11-01T20:08:19.104Z",
+  "scenario": "crash-start",
+  "baseUrl": "http://127.0.0.1:3000",
+  "environment": {
+    "platform": "win32",
+    "platformRelease": "10.0.26300",
+    "architecture": "x64",
+    "nodeVersion": "v22.23.4",
+    "cpuModel": "13th Gen Intel(R) Core(TM) i5-1335U",
+    "logicalCpuCount": 12
+  },
+  "success": true,
+  "startedAt": "2026-11-01T20:08:19.105Z",
+  "completedAt": "2026-11-01T20:10:41.360Z",
+  "elapsedMs": 142255.2998,
+  "submissionLatencyMs": 2250.5762,
+  "workspaceId": "10000000-0000-4000-8000-000000000001",
+  "job": {
+    "id": "5999b614-4538-4027-9a14-adbb7143b537",
+    "status": "running",
+    "targetStageId": "20000000-0000-4000-8000-000000000066",
+    "counters": {
+      "matchedCount": 50000,
+      "processedCount": 15300,
+      "movedCount": 15300,
+      "skippedCount": 0,
+      "failedCount": 0,
+      "pendingCount": 34700
+    },
+    "workerStartedAt": "2026-11-02T01:38:22.079Z",
+    "workerCompletedAt": null,
+    "persistedWallClockElapsedMs": null,
+    "throughput": null
+  },
+  "progressImmediatelyBeforeStop": {
+    "matchedCount": 50000,
+    "processedCount": 100,
+    "movedCount": 100,
+    "skippedCount": 0,
+    "failedCount": 0,
+    "pendingCount": 49900
+  },
+  "progressAtStop": {
+    "matchedCount": 50000,
+    "processedCount": 15300,
+    "movedCount": 15300,
+    "skippedCount": 0,
+    "failedCount": 0,
+    "pendingCount": 34700
+  },
+  "progressFirstObservedAt": "2026-11-01T20:08:24.508Z",
+  "workerStopConfirmedAt": "2026-11-01T20:10:41.248Z",
+  "operatorAction": "Worker stop was operator-attested. No other worker may run during the experiment. Restart the worker manually, then run crash-resume with this checkpoint."
+}

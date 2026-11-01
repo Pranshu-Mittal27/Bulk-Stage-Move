@@ -42,12 +42,12 @@ This document records deliberate scope choices and verified limitations in the t
 - **Why deferred:** Returning a stable status response was kept separate from adding wait-state derivation and API semantics.
 - **Possible next-week improvement:** Agree on the meanings and lifecycle of wait reasons before exposing them, then derive the value from persisted state and cover it in API tests.
 
-### Throughput and production-scale behavior remain unverified
+### Production-scale behavior remains unverified
 
-- **Current behavior:** The repository now includes the `benchmark:bulk` command and a reproducible benchmark harness. No benchmark results have been measured yet; the harness does not itself demonstrate performance or establish production-scale capacity.
-- **Impact:** Throughput, database contention, completion time at larger data volumes, and interactive latency impact remain unverified; there is insufficient evidence to identify a performance bottleneck.
-- **Why deferred:** Correctness and transaction behavior were established first. Performance claims still require running the harness against a representative seeded dataset in a recorded environment.
-- **Possible next-week improvement:** Run the documented baseline, 50,000-item bulk, interactive-latency, and crash-recovery scenarios on a representative environment; record the hardware and configuration before tuning or making capacity claims.
+- **Current behavior:** The repository includes the `benchmark:bulk` command and a reproducible benchmark harness. Initial local baseline, 50,000-item bulk, and operator-attested crash/recovery runs have been measured and documented in `docs/BENCHMARKS.md`.
+- **Impact:** These single local runs provide observed persisted end-to-end throughput and interactive latency for the tested workload. They do not establish isolated worker processing rate, production-scale capacity, performance at larger data volumes, or a stable causal estimate of bulk work's latency impact. Database contention and bottlenecks remain unverified.
+- **Why deferred:** Correctness and transaction behavior were established first. The initial local measurements are not repeated or representative-environment evidence for production performance claims.
+- **Possible next-week improvement:** Repeat the documented scenarios and test representative mixed/higher-load workloads in a representative environment; record hardware and configuration, and inspect contention before tuning or making capacity claims.
 
 ### One active job per worker process and fixed batch size
 
@@ -62,7 +62,7 @@ The implementation retains workspace isolation, idempotent submission, snapshot 
 
 ## Suggested next-week priorities
 
-1. **Establish performance evidence.** Define a representative database/workload and benchmark submission and worker throughput; capture query plans and contention before proposing optimizations.
+1. **Strengthen performance evidence.** Repeat the existing local scenarios and define representative workloads/environment for submission, persisted end-to-end throughput, and interactive latency; capture query plans and contention before proposing optimizations.
 2. **Assess queue fairness with evidence.** Measure queue wait time by workspace and job under mixed load, then decide whether the current oldest-eligible ordering is insufficient.
 3. **Investigate lock-wait behavior.** Exercise due items held by competing transactions and measure polling, lease renewals, and time to resume.
 4. **Clarify operational handling of anomalies and wait reasons.** Review observed anomaly frequency and client needs before adding reconciliation or exposing new API state.

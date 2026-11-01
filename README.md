@@ -82,24 +82,39 @@ npm test
 npm run test:e2e
 ```
 
+**E2E database safety:** E2E tests use the database configured by `DATABASE_URL`; they write and delete test fixtures and may create and drop test triggers. Before running `npm run test:e2e`, configure `DATABASE_URL` to a dedicated disposable test database. Never run E2E tests against the seed database, benchmark database, or any valuable database. Do not expose or print connection strings.
+
 ## Database scripts
 
-For the assignment dataset, use this order with a dedicated, disposable PostgreSQL database named `ghl_bulk_stage_seed`:
+For the assignment dataset, use a dedicated, disposable PostgreSQL database. The existing seed database is named `ghl_bulk_stage_seed`; use a separate database such as `ghl_bulk_stage_bench` for an isolated benchmark run. Choose one target throughout the steps below. Create it only if it does not already exist:
 
-1. Create the database using pgAdmin or a PostgreSQL administration connection:
+1. If the selected database does not already exist, create it using pgAdmin or a PostgreSQL administration connection. Run only the matching statement:
 
    ```sql
    CREATE DATABASE ghl_bulk_stage_seed;
    ```
 
-2. In the PowerShell terminal you will use for the remaining commands, set `DATABASE_URL` to that database. Replace the placeholders locally; URL-encode special characters in the username or password:
+   Or, instead:
+
+   ```sql
+   CREATE DATABASE ghl_bulk_stage_bench;
+   ```
+
+2. In the PowerShell terminal you will use for the remaining commands, set `DATABASE_URL` to the selected database. Replace the placeholders locally; URL-encode special characters in the username or password. Use the URL for the same database you selected in step 1:
 
    ```powershell
    $env:DATABASE_URL = 'postgresql://<URL-encoded-user>:<URL-encoded-password>@<host>:<port>/ghl_bulk_stage_seed'
    node -e "console.log(decodeURIComponent(new URL(process.env.DATABASE_URL).pathname.slice(1)))"
    ```
 
-   The second command prints only the URL's database name, not credentials. It does **not** verify the PostgreSQL server identity. Independently verify both server and database in pgAdmin before proceeding, for example with `SELECT current_database(), current_user, inet_server_addr(), inet_server_port();`.
+   Or, for the isolated benchmark database:
+
+   ```powershell
+   $env:DATABASE_URL = 'postgresql://<URL-encoded-user>:<URL-encoded-password>@<host>:<port>/ghl_bulk_stage_bench'
+   node -e "console.log(decodeURIComponent(new URL(process.env.DATABASE_URL).pathname.slice(1)))"
+   ```
+
+   The second command prints only the URL's database name, not credentials. Independently verify both server and database in pgAdmin before proceeding, for example with `SELECT current_database(), current_user, inet_server_addr(), inet_server_port();`. The seed confirmation and database-name checks do not verify server identity or prove the database is disposable.
 
 3. Generate the Prisma client if needed:
 
@@ -113,11 +128,19 @@ For the assignment dataset, use this order with a dedicated, disposable PostgreS
    npm run db:migrate:deploy
    ```
 
-5. Run the assignment seed with its explicit database confirmation:
+5. Run the assignment seed with an explicit confirmation matching the selected database name. The existing seed command remains:
 
    ```powershell
    npm run db:seed:assignment -- --confirm-disposable-database ghl_bulk_stage_seed
    ```
+
+   For the separate benchmark database configured above, use:
+
+   ```powershell
+   npm run db:seed:assignment -- --confirm-disposable-database ghl_bulk_stage_bench
+   ```
+
+   Names must start with a lowercase letter, contain only lowercase letters, digits, or underscores, and be no longer than 63 characters. The script checks that the decoded `DATABASE_URL` database name and PostgreSQL `current_database()` both match the explicit confirmation. These name checks do not validate host/server identity or prove disposability; independently verify the server and database before migrating or seeding.
 
 6. Run validation checks:
 
@@ -131,7 +154,7 @@ For the assignment dataset, use this order with a dedicated, disposable PostgreS
    npm run test:e2e
    ```
 
-Both `db:migrate:deploy` and `db:seed:assignment` write to the database selected by `DATABASE_URL`. Independently verify the PostgreSQL server **and** database before running either command. The seed's database-name check and confirmation argument do not prove that the target is disposable; never run it or migrations against a production, shared, or otherwise valuable database.
+Both `db:migrate:deploy` and `db:seed:assignment` write to the database selected by `DATABASE_URL`. Independently verify the PostgreSQL server **and** database before running either command; never run them against a production, shared, or otherwise valuable database. The seed uses bounded inserts and is not one transaction, so an interruption can leave partial data. It does not delete or update existing records.
 
 The `db:check` command executes a read-only connectivity probe. Database, migration, and Studio commands require a configured `DATABASE_URL`. Review schema changes before applying any migrations.
 
@@ -151,7 +174,7 @@ The seed command writes to PostgreSQL. Do not run it against a production, share
 
 ## Benchmark harness
 
-The reproducible baseline, during-bulk, and manual crash/recovery benchmark commands are documented in [docs/BENCHMARKS.md](./docs/BENCHMARKS.md). The harness uses the existing opportunity-list and bulk-job APIs; it does not connect to PostgreSQL or manage processes. Match request rate and concurrency between baseline and during-bulk runs, but their actual measurement durations differ and are reported separately. There is no warm-up period, so connection establishment/reuse may affect latency percentiles. Crash-recovery requires a single worker, remains operator-attested, and cannot independently prove which process caused progress. Bulk scenarios require exactly 50,000 matched items; no measured results are included yet.
+The reproducible baseline, during-bulk, and manual crash/recovery benchmark commands are documented in [docs/BENCHMARKS.md](./docs/BENCHMARKS.md). Actual local baseline, 50,000-item bulk, and operator-attested crash/recovery measurements are documented there. The harness uses the existing opportunity-list and bulk-job APIs; it does not connect to PostgreSQL or manage processes. Match request rate and concurrency between baseline and during-bulk runs, but their actual measurement durations differ and are reported separately. There is no warm-up period, so connection establishment/reuse may affect latency percentiles. Crash-recovery requires a single worker, remains operator-attested, and cannot independently prove which process caused progress. Bulk scenarios require exactly 50,000 matched items.
 
 ## Opportunity API
 
