@@ -84,16 +84,74 @@ npm run test:e2e
 
 ## Database scripts
 
+For the assignment dataset, use this order with a dedicated, disposable PostgreSQL database named `ghl_bulk_stage_seed`:
+
+1. Create the database using pgAdmin or a PostgreSQL administration connection:
+
+   ```sql
+   CREATE DATABASE ghl_bulk_stage_seed;
+   ```
+
+2. In the PowerShell terminal you will use for the remaining commands, set `DATABASE_URL` to that database. Replace the placeholders locally; URL-encode special characters in the username or password:
+
+   ```powershell
+   $env:DATABASE_URL = 'postgresql://<URL-encoded-user>:<URL-encoded-password>@<host>:<port>/ghl_bulk_stage_seed'
+   node -e "console.log(decodeURIComponent(new URL(process.env.DATABASE_URL).pathname.slice(1)))"
+   ```
+
+   The second command prints only the URL's database name, not credentials. It does **not** verify the PostgreSQL server identity. Independently verify both server and database in pgAdmin before proceeding, for example with `SELECT current_database(), current_user, inet_server_addr(), inet_server_port();`.
+
+3. Generate the Prisma client if needed:
+
+   ```powershell
+   npm run db:generate
+   ```
+
+4. Apply the existing migrations to the verified target:
+
+   ```powershell
+   npm run db:migrate:deploy
+   ```
+
+5. Run the assignment seed with its explicit database confirmation:
+
+   ```powershell
+   npm run db:seed:assignment -- --confirm-disposable-database ghl_bulk_stage_seed
+   ```
+
+6. Run validation checks:
+
+   ```powershell
+   npm run db:validate
+   npm run db:check
+   npm test -- --runInBand scripts/assignment-seed-data.spec.ts
+   npm run format:check
+   npm run lint
+   npm test
+   npm run test:e2e
+   ```
+
+Both `db:migrate:deploy` and `db:seed:assignment` write to the database selected by `DATABASE_URL`. Independently verify the PostgreSQL server **and** database before running either command. The seed's database-name check and confirmation argument do not prove that the target is disposable; never run it or migrations against a production, shared, or otherwise valuable database.
+
+The `db:check` command executes a read-only connectivity probe. Database, migration, and Studio commands require a configured `DATABASE_URL`. Review schema changes before applying any migrations.
+
+### Assignment dataset seed
+
+The assignment seed creates six workspaces, each with 12 stages. The large workspace has exactly 500,000 opportunities distributed unevenly across its stages; the five smaller workspaces have 2,000, 2,500, 3,000, 3,500, and 4,000 opportunities. Opportunity dates are deterministically spread from May 1, 2025 through November 1, 2026 (UTC).
+
+The seed uses fixed IDs and bounded 1,000-row inserts with duplicate skipping, which supports resuming an interrupted run. It does not delete or update existing records. On reruns it verifies workspace totals, stage counts, and date bounds, but does not validate each existing opportunity's fields individually; aggregate checks can miss modified fields. Workspace and stage creation timestamps use database defaults and are not fully deterministic, and writes from earlier batches remain if the script fails. Existing seed workspace/stage conflicts or an opportunity count above the expected total cause it to stop rather than clean up records.
+
+The generated dataset plan is covered by `scripts/assignment-seed-data.spec.ts`; run it with:
+
 ```powershell
-npm run db:validate
-npm run db:generate
-npm run db:check
-npm run db:migrate:dev
-npm run db:migrate:deploy
-npm run db:studio
+npm test -- --runInBand scripts/assignment-seed-data.spec.ts
 ```
 
-The `db:check` command executes a read-only connectivity probe. `db:check`, migration, and Studio commands require a configured `DATABASE_URL`. Review schema changes before applying any migrations.
+The seed command writes to PostgreSQL. Do not run it against a production, shared, or otherwise valuable database.
+
+## Benchmark harness
+
+The reproducible baseline, during-bulk, and manual crash/recovery benchmark commands are documented in [docs/BENCHMARKS.md](./docs/BENCHMARKS.md). The harness uses the existing opportunity-list and bulk-job APIs; it does not connect to PostgreSQL or manage processes. Match request rate and concurrency between baseline and during-bulk runs, but their actual measurement durations differ and are reported separately. There is no warm-up period, so connection establishment/reuse may affect latency percentiles. Crash-recovery requires a single worker, remains operator-attested, and cannot independently prove which process caused progress. Bulk scenarios require exactly 50,000 matched items; no measured results are included yet.
 
 ## Opportunity API
 

@@ -42,12 +42,12 @@ This document records deliberate scope choices and verified limitations in the t
 - **Why deferred:** Returning a stable status response was kept separate from adding wait-state derivation and API semantics.
 - **Possible next-week improvement:** Agree on the meanings and lifecycle of wait reasons before exposing them, then derive the value from persisted state and cover it in API tests.
 
-### Throughput and production-scale behavior are unbenchmarked
+### Throughput and production-scale behavior remain unverified
 
-- **Current behavior:** The repository contains unit and PostgreSQL integration tests, but no benchmark or load-test command or measured throughput result was found. The implementation therefore has no demonstrated production-scale capacity claim.
-- **Impact:** Throughput, database contention, and completion time at larger data volumes are unknown; there is insufficient evidence to identify a performance bottleneck.
-- **Why deferred:** Correctness and transaction behavior were established first, and performance claims require a representative seeded dataset and repeatable environment.
-- **Possible next-week improvement:** Define a representative workload and database environment, benchmark submission and worker processing separately, and record throughput, latency, and query plans before tuning.
+- **Current behavior:** The repository now includes the `benchmark:bulk` command and a reproducible benchmark harness. No benchmark results have been measured yet; the harness does not itself demonstrate performance or establish production-scale capacity.
+- **Impact:** Throughput, database contention, completion time at larger data volumes, and interactive latency impact remain unverified; there is insufficient evidence to identify a performance bottleneck.
+- **Why deferred:** Correctness and transaction behavior were established first. Performance claims still require running the harness against a representative seeded dataset in a recorded environment.
+- **Possible next-week improvement:** Run the documented baseline, 50,000-item bulk, interactive-latency, and crash-recovery scenarios on a representative environment; record the hardware and configuration before tuning or making capacity claims.
 
 ### One active job per worker process and fixed batch size
 
