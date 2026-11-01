@@ -8,10 +8,8 @@ const defaultLeaseDurationMs = 30_000;
 const minimumLeaseDurationMs = 1_000;
 const maximumLeaseDurationMs = 300_000;
 const maximumWorkerIdLength = 128;
-const renewalTransactionTimeoutMs = 70_000;
-const renewalTransactionMaxWaitMs = 10_000;
-const claimTransactionTimeoutMs = 70_000;
-const claimTransactionMaxWaitMs = 10_000;
+const leaseTransactionTimeoutMs = 70_000;
+const leaseTransactionMaxWaitMs = 10_000;
 
 export interface BulkJobLeaseToken {
   jobId: string;
@@ -266,8 +264,8 @@ export class BulkJobLeaseService {
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
-        maxWait: claimTransactionMaxWaitMs,
-        timeout: claimTransactionTimeoutMs,
+        maxWait: leaseTransactionMaxWaitMs,
+        timeout: leaseTransactionTimeoutMs,
       },
     );
 
@@ -360,8 +358,8 @@ export class BulkJobLeaseService {
         };
       },
       {
-        maxWait: renewalTransactionMaxWaitMs,
-        timeout: renewalTransactionTimeoutMs,
+        maxWait: leaseTransactionMaxWaitMs,
+        timeout: leaseTransactionTimeoutMs,
       },
     );
   }
@@ -461,8 +459,8 @@ export class BulkJobLeaseService {
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
-        maxWait: claimTransactionMaxWaitMs,
-        timeout: claimTransactionTimeoutMs,
+        maxWait: leaseTransactionMaxWaitMs,
+        timeout: leaseTransactionTimeoutMs,
       },
     );
   }

@@ -151,16 +151,11 @@ export class BulkJobWorkerService {
         if (this.shutdownRequested) {
           return;
         }
-        if (
-          result.kind === 'processed' ||
-          this.shouldRenew(lastRenewalAt, renewalIntervalMs)
-        ) {
-          const renewed = await this.renew(token);
-          if (!renewed) {
-            return;
-          }
-          lastRenewalAt = performance.now();
+        const renewed = await this.renew(token);
+        if (!renewed) {
+          return;
         }
+        lastRenewalAt = performance.now();
         continue;
       }
 

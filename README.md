@@ -205,7 +205,7 @@ The first accepted request returns `202`; a repeated workspace/key with the same
 
 `GET /api/v1/bulk-stage-moves/<job-id>`
 
-The lookup is scoped by both workspace and job. Missing and cross-workspace jobs return `404 resource_not_found`. The response contains persisted job state, with `pendingCount = matchedCount - processedCount`; failure messages are returned as a safe generic message rather than exposing internal details. `waitingReason` is currently null because there is no worker/wait-state implementation.
+The lookup is scoped by both workspace and job. Missing and cross-workspace jobs return `404 resource_not_found`. The response contains persisted job state, with `pendingCount = matchedCount - processedCount`; failure messages are returned as a safe generic message rather than exposing internal details. The response builder currently returns `waitingReason: null`; this endpoint does not expose wait-state detection.
 
 Example response:
 
