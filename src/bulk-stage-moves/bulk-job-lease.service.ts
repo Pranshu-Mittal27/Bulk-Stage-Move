@@ -8,6 +8,8 @@ const defaultLeaseDurationMs = 30_000;
 const minimumLeaseDurationMs = 1_000;
 const maximumLeaseDurationMs = 300_000;
 const maximumWorkerIdLength = 128;
+const renewalTransactionTimeoutMs = 70_000;
+const renewalTransactionMaxWaitMs = 10_000;
 
 export interface BulkJobLeaseToken {
   jobId: string;
@@ -51,6 +53,12 @@ interface RenewedLeaseRow {
   heartbeatAt: Date;
 }
 
+interface CurrentLeaseRow {
+  status: string;
+  leaseOwner: string | null;
+  leaseGeneration: number;
+}
+
 export function parseLeaseDurationMs(value: string | undefined): number {
   if (value === undefined) {
     return defaultLeaseDurationMs;
@@ -87,7 +95,7 @@ function validateWorkerId(workerId: string): string {
   return workerId;
 }
 
-function validateToken(token: BulkJobLeaseToken): void {
+export function validateBulkJobLeaseToken(token: BulkJobLeaseToken): void {
   if (!token || !isUUID(token.jobId)) {
     throw new TypeError('Lease token job ID must be a valid UUID.');
   }
@@ -184,37 +192,72 @@ export class BulkJobLeaseService {
   }
 
   async renew(token: BulkJobLeaseToken): Promise<RenewBulkJobLeaseResult> {
-    validateToken(token);
-    const rows = await this.prisma.$queryRaw<RenewedLeaseRow[]>(
-      Prisma.sql`
-        WITH renewal_time AS MATERIALIZED (
-          SELECT clock_timestamp() AS "now"
-        )
-        UPDATE "BulkJob" AS job
-        SET
-          "leaseExpiresAt" = renewal_time."now"
-            + (${this.leaseDurationMs} * INTERVAL '1 millisecond'),
-          "heartbeatAt" = renewal_time."now"
-        FROM renewal_time
-        WHERE job."id" = ${token.jobId}::uuid
-          AND job."leaseOwner" = ${token.leaseOwner}
-          AND job."leaseGeneration" = ${token.leaseGeneration}
-          AND job."status" = 'running'::"BulkJobStatus"
-          AND job."leaseExpiresAt" > renewal_time."now"
-        RETURNING
-          job."leaseExpiresAt" AS "leaseExpiresAt",
-          job."heartbeatAt" AS "heartbeatAt"
+    validateBulkJobLeaseToken(token);
+    return this.prisma.$transaction(
+      async (transaction) => {
+        const currentJobs = await transaction.$queryRaw<CurrentLeaseRow[]>(
+          Prisma.sql`
+        SELECT
+          "status" AS "status",
+          "leaseOwner" AS "leaseOwner",
+          "leaseGeneration" AS "leaseGeneration"
+        FROM "BulkJob"
+        WHERE "id" = ${token.jobId}::uuid
+        FOR UPDATE
       `,
-    );
+        );
+        const current = currentJobs[0];
+        if (
+          !current ||
+          current.status !== BulkJobStatus.running ||
+          current.leaseOwner !== token.leaseOwner ||
+          current.leaseGeneration !== token.leaseGeneration
+        ) {
+          return { kind: 'lease_lost' };
+        }
 
-    const renewed = rows[0];
-    if (!renewed) {
-      return { kind: 'lease_lost' };
-    }
-    return {
-      kind: 'renewed',
-      leaseExpiresAt: renewed.leaseExpiresAt,
-      heartbeatAt: renewed.heartbeatAt,
-    };
+        const validity = await transaction.$queryRaw<{ valid: boolean }[]>(
+          Prisma.sql`
+          SELECT "leaseExpiresAt" > clock_timestamp() AS "valid"
+          FROM "BulkJob"
+          WHERE "id" = ${token.jobId}::uuid
+        `,
+        );
+        if (!validity[0]?.valid) {
+          return { kind: 'lease_lost' };
+        }
+
+        const renewedRows = await transaction.$queryRaw<RenewedLeaseRow[]>(
+          Prisma.sql`
+          UPDATE "BulkJob" AS job
+          SET
+            "leaseExpiresAt" = clock_timestamp()
+              + (${this.leaseDurationMs} * INTERVAL '1 millisecond'),
+            "heartbeatAt" = clock_timestamp()
+          WHERE job."id" = ${token.jobId}::uuid
+            AND job."leaseOwner" = ${token.leaseOwner}
+            AND job."leaseGeneration" = ${token.leaseGeneration}
+            AND job."status" = 'running'::"BulkJobStatus"
+            AND job."leaseExpiresAt" > clock_timestamp()
+          RETURNING
+            job."leaseExpiresAt" AS "leaseExpiresAt",
+            job."heartbeatAt" AS "heartbeatAt"
+        `,
+        );
+        const renewed = renewedRows[0];
+        if (!renewed) {
+          return { kind: 'lease_lost' };
+        }
+        return {
+          kind: 'renewed',
+          leaseExpiresAt: renewed.leaseExpiresAt,
+          heartbeatAt: renewed.heartbeatAt,
+        };
+      },
+      {
+        maxWait: renewalTransactionMaxWaitMs,
+        timeout: renewalTransactionTimeoutMs,
+      },
+    );
   }
 }
