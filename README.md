@@ -64,11 +64,13 @@ The starter endpoint is `GET /`. Swagger UI is available at `http://localhost:30
 
 The API and worker run as separate processes and share the same PostgreSQL database and durable job queue. Start the API with `npm run start:dev`; in a second terminal, start the worker with `npm run start:worker:dev`. After building, run the worker with `npm run start:worker`. The worker creates a NestJS application context without an HTTP listener.
 
-Each worker process handles one claimed job at a time. Multiple worker processes may run concurrently; PostgreSQL row locking and lease generations coordinate claims. A claim requires at least one pending item whose item-level `nextAttemptAt` is null or due according to PostgreSQL time. Item scheduling is authoritative: the job-level `nextAttemptAt` is only a scheduling hint, so stale hints cannot make future-only work run early or hide due items. When all pending items are scheduled in the future, the worker uses a lease-fenced transaction to return the job to `queued`, schedule it at the earliest pending-item time, and release the lease. A later claim increments the lease generation and clears the hint.
+Each worker process handles one claimed job at a time and yields after at most five completed batch or recorded retry attempts when work remains. Empty polls while due rows are locked do not consume the quantum. The yield transaction checks the current lease owner, generation, and expiry; it then returns due work to `queued` and releases the lease. The next claim increments the lease generation, so the yielding worker cannot continue with its old token. Eligible jobs are ordered by oldest progress time (falling back to creation time), so a recently progressed job moves behind jobs that have waited longer. This is a basic job-scheduling fairness measure, not workspace isolation or a starvation guarantee. Multiple worker processes may run concurrently; PostgreSQL row locking and lease generations coordinate claims.
+
+A claim requires at least one pending item whose item-level `nextAttemptAt` is null or due according to PostgreSQL time. Item scheduling is authoritative: the job-level `nextAttemptAt` is only a scheduling hint, so stale hints cannot make future-only work run early or hide due items. At a yield boundary, if all remaining items are scheduled in the future, the worker returns the job to `queued` at the earliest pending-item time without changing item schedules, then releases the lease. A later claim increments the lease generation and clears the hint.
 
 If a batch reports no due items but the deferral check finds due items still present, the worker waits with bounded polling jitter and renews the lease only when needed before checking again. If the deferral transaction errors, its commit outcome may be ambiguous: the worker discards the token, stops that attempt, waits with bounded backoff, and returns to normal claim polling without processing or renewing with the old token. A no-pending-items result is treated as an anomaly, not as successful completion. The worker also runs a read-only diagnostic at most once per minute, logging IDs and statuses of queued/running jobs with no pending items and logging diagnostic query errors.
 
-The accepted limitations are that this is not a general fairness scheduler, due items that remain locked may keep a worker polling and renewing their job lease, and zero-pending anomalies are logged but not automatically reconciled or completed. SIGINT/SIGTERM stop new claims and allow an active batch to settle before the process closes its database connection. Any unfinished lease is left for normal expiry and reclaim; the worker does not forcibly release it.
+Yielding improves the opportunity for other eligible jobs to run, but does not guarantee interactive API latency: worker and API processes still share PostgreSQL resources. Due items that remain locked may keep a worker polling and renewing their job lease, and zero-pending anomalies are logged but not automatically reconciled or completed. SIGINT/SIGTERM stop new claims and allow an active batch to settle before the process closes its database connection. Any unfinished lease is left for normal expiry and reclaim; the worker does not forcibly release it.
 
 `BULK_JOB_WORKER_LEASE_DURATION_MS` defaults to 120,000 milliseconds and must be at least 90,000 milliseconds for the worker. It is worker-specific; the API's existing `BULK_JOB_LEASE_DURATION_MS` setting and 30,000-millisecond default are unchanged. `BULK_JOB_POLL_INTERVAL_MS` defaults to 1,000 milliseconds and accepts values from 100 through 60,000 milliseconds. `BULK_JOB_WORKER_ID` is optional; when omitted, the worker uses its hostname and process ID. Poll waits include up to 20% jitter. Claim-error backoff doubles from the configured poll interval, caps its base delay at 30 seconds, then applies the same jitter, so its maximum actual wait is less than 36 seconds.
 
@@ -79,10 +81,21 @@ npm run build
 npm run lint
 npm run format:check
 npm test
-npm run test:e2e
 ```
 
-**E2E database safety:** E2E tests use the database configured by `DATABASE_URL`; they write and delete test fixtures and may create and drop test triggers. Before running `npm run test:e2e`, configure `DATABASE_URL` to a dedicated disposable test database. Never run E2E tests against the seed database, benchmark database, or any valuable database. Do not expose or print connection strings.
+**E2E database safety:** E2E tests use the effective `DATABASE_URL`; they write and delete fixtures and may create and drop test triggers. Use a separate, dedicated disposable PostgreSQL database. Never run E2E tests against the seed, benchmark, development, or any valuable database. Set `DATABASE_URL` to that test database in the same PowerShell session where you run the tests. A database name alone does not establish that the server or database is disposable; independently verify the target server and database in pgAdmin first. Do not expose or print connection strings.
+
+To prepare and run E2E tests, first create or select the dedicated disposable test database and independently verify its server and database identity in pgAdmin. Then, in the PowerShell terminal used for the tests, configure the test database URL (replace placeholders locally; URL-encode special characters):
+
+```powershell
+$env:DATABASE_URL = 'postgresql://<URL-encoded-user>:<URL-encoded-password>@<verified-test-server>:<port>/ghl_bulk_stage_test'
+node -e "console.log(decodeURIComponent(new URL(process.env.DATABASE_URL).pathname.slice(1)))"
+npm run db:generate
+npm run db:migrate:deploy
+npm run test:e2e -- --runInBand
+```
+
+The name-only check should report `ghl_bulk_stage_test`; it does not verify server identity or prove disposability. Run `db:migrate:deploy` only after independently confirming the selected target is the dedicated disposable test database, and only when its schema migrations have not already been applied. Keep this same terminal and `DATABASE_URL` for the E2E command. Do not use the seed or benchmark database for this sequence.
 
 ## Database scripts
 
@@ -151,8 +164,9 @@ For the assignment dataset, use a dedicated, disposable PostgreSQL database. The
    npm run format:check
    npm run lint
    npm test
-   npm run test:e2e
    ```
+
+   Run E2E tests separately using the dedicated disposable test-database procedure above, not the seed or benchmark database configured for this section.
 
 Both `db:migrate:deploy` and `db:seed:assignment` write to the database selected by `DATABASE_URL`. Independently verify the PostgreSQL server **and** database before running either command; never run them against a production, shared, or otherwise valuable database. The seed uses bounded inserts and is not one transaction, so an interruption can leave partial data. It does not delete or update existing records.
 
@@ -317,7 +331,7 @@ Invalid headers, keys, UUIDs, filter values, ranges, and timestamps return `400 
 
 ### Lease-management service
 
-The internal `BulkJobLeaseService` provides `claimNext(workerId)`, `renew(token)`, and `deferIfNoDueItems(token)` for the worker process. Claims atomically select queued jobs or running jobs with expired leases using PostgreSQL row locking and database time. Both paths require at least one pending item whose item-level `nextAttemptAt` is null or due; the job-level schedule is not an eligibility gate. A successful claim sets status to `running`, assigns the owner and expiry, updates the heartbeat, increments `leaseGeneration`, sets `startedAt` only once, and clears the job scheduling hint. Renewal succeeds only while the matching job ID, owner, generation, running status, and unexpired lease still match. Deferral locks the job first, checks the same lease token and database-time expiry, and only queues the job when pending items exist and all are scheduled in the future. It sets the job hint to the earliest pending-item time and clears the lease owner/expiry without changing item state, generation, progress, retry count, heartbeat, or cursor. Its results distinguish deferred work, lost leases, remaining due items, and jobs with no pending items. Transaction errors propagate; the worker treats an ambiguous outcome as a reason to discard the token. No eligible job returns `{ "kind": "empty" }`.
+The internal `BulkJobLeaseService` provides `claimNext(workerId)`, `renew(token)`, `deferIfNoDueItems(token)`, and `yieldAfterQuantum(token)` for the worker process. Claims atomically select queued jobs or running jobs with expired leases using PostgreSQL row locking and database time. Both paths require at least one pending item whose item-level `nextAttemptAt` is null or due; the job-level schedule is not an eligibility gate. A successful claim sets status to `running`, assigns the owner and expiry, updates the heartbeat, increments `leaseGeneration`, sets `startedAt` only once, and clears the job scheduling hint. Renewal succeeds only while the matching job ID, owner, generation, running status, and unexpired lease still match. After five completed batch or recorded retry attempts, `yieldAfterQuantum` locks and validates the job, then requeues due pending work and clears its lease, or—if all pending work is in the future—sets the job hint to the earliest pending-item time and clears the lease. Neither path changes item state, progress, retry count, heartbeat, cursor, or lease generation. Item schedules remain authoritative. Deferral distinguishes deferred work, lost leases, due items remaining, and jobs with no pending items; yield distinguishes yielded work, deferred work, lost leases, and jobs with no pending items. Transaction errors propagate; the worker treats an ambiguous outcome as a reason to discard the token. No eligible job returns `{ "kind": "empty" }`.
 
 The caller supplies a stable worker ID; the service does not generate one. `BULK_JOB_LEASE_DURATION_MS` configures lease duration, defaulting to 30,000 milliseconds and accepting values from 1,000 through 300,000 milliseconds. Claims and renewals use PostgreSQL time.
 

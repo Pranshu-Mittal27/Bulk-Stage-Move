@@ -16,6 +16,7 @@ import type { WorkerConfig } from './worker.config.js';
 const maximumClaimBackoffMs = 30_000;
 const jitterRatio = 0.2;
 const anomalyDiagnosticIntervalMs = 60_000;
+const maximumBatchesPerClaim = 5;
 
 @Injectable()
 export class BulkJobWorkerService {
@@ -89,6 +90,7 @@ export class BulkJobWorkerService {
   private async processClaim(token: BulkJobLeaseToken): Promise<void> {
     const renewalIntervalMs = this.config.leaseDurationMs / 3;
     let lastRenewalAt = performance.now();
+    let quantumAttempts = 0;
 
     while (!this.shutdownRequested) {
       await this.runAnomalyDiagnosticIfDue();
@@ -101,6 +103,7 @@ export class BulkJobWorkerService {
         result = await this.processing.processBatch(token);
       } catch (error) {
         if (error instanceof RetryableBulkJobProcessingError) {
+          quantumAttempts += 1;
           this.log('retryable_batch_error', {
             jobId: token.jobId,
             itemId: error.itemId.toString(),
@@ -110,6 +113,10 @@ export class BulkJobWorkerService {
             error.retryMetadataStatus !== 'recorded' ||
             this.shutdownRequested
           ) {
+            return;
+          }
+          if (quantumAttempts >= maximumBatchesPerClaim) {
+            await this.yieldClaim(token);
             return;
           }
         } else {
@@ -134,6 +141,7 @@ export class BulkJobWorkerService {
       }
 
       if (result.kind === 'processed') {
+        quantumAttempts += 1;
         this.log('batch_processed', {
           jobId: token.jobId,
           batchProcessedCount: result.batchProcessedCount,
@@ -149,6 +157,10 @@ export class BulkJobWorkerService {
           return;
         }
         if (this.shutdownRequested) {
+          return;
+        }
+        if (quantumAttempts >= maximumBatchesPerClaim) {
+          await this.yieldClaim(token);
           return;
         }
         const renewed = await this.renew(token);
@@ -200,6 +212,36 @@ export class BulkJobWorkerService {
         lastRenewalAt = performance.now();
       }
     }
+  }
+
+  private async yieldClaim(token: BulkJobLeaseToken): Promise<void> {
+    let result: Awaited<ReturnType<BulkJobLeaseService['yieldAfterQuantum']>>;
+    try {
+      result = await this.leases.yieldAfterQuantum(token);
+    } catch (error) {
+      this.log('job_yield_failed', {
+        jobId: token.jobId,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      });
+      return;
+    }
+
+    if (result.kind === 'yielded') {
+      this.log('job_yielded', { jobId: token.jobId });
+      return;
+    }
+    if (result.kind === 'deferred') {
+      this.log('job_deferred', { jobId: token.jobId, reason: 'future_items' });
+      return;
+    }
+    if (result.kind === 'lease_lost') {
+      this.log('lease_lost', { jobId: token.jobId, operation: 'yield' });
+      return;
+    }
+    this.logWarning('job_has_no_pending_items', {
+      jobId: token.jobId,
+      operation: 'yield',
+    });
   }
 
   private async runAnomalyDiagnosticIfDue(): Promise<void> {

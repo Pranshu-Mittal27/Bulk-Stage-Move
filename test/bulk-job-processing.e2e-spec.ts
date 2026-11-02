@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import request from 'supertest';
 import { AppModule } from '../src/app.module.js';
 import { configureApplication } from '../src/common/configure-application.js';
 import { BulkJobLeaseService } from '../src/bulk-stage-moves/bulk-job-lease.service.js';
@@ -9,6 +10,7 @@ import {
   RetryableBulkJobProcessingError,
   type RetryMetadataStatus,
 } from '../src/bulk-stage-moves/bulk-job-processing.service.js';
+import { BulkJobWorkerService } from '../src/worker/worker.service.js';
 import { PrismaService } from '../src/database/prisma.service.js';
 import {
   BulkJobItemStatus,
@@ -200,6 +202,21 @@ describe('Bulk job batch processing (e2e)', () => {
     expect(job.matchedCount).toBeGreaterThanOrEqual(job.processedCount);
   }
 
+  async function waitForDatabaseCondition<T>(
+    read: () => Promise<T | undefined>,
+    description: string,
+  ): Promise<T> {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const result = await read();
+      if (result !== undefined) {
+        return result;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`Timed out waiting for ${description}.`);
+  }
+
   async function installConflictTrigger(): Promise<void> {
     await prisma.$executeRaw`
       DROP TRIGGER IF EXISTS "bulk_processing_retry_test" ON "OpportunityTransition"
@@ -291,6 +308,12 @@ describe('Bulk job batch processing (e2e)', () => {
     await prisma.$executeRaw`
       DROP FUNCTION IF EXISTS "bulk_processing_heartbeat_wait_test"()
     `;
+    await prisma.$executeRaw`
+      DROP TRIGGER IF EXISTS "bulk_manual_race_test" ON "Opportunity"
+    `;
+    await prisma.$executeRaw`
+      DROP FUNCTION IF EXISTS "bulk_manual_race_test"()
+    `;
     const jobs = await prisma.bulkJob.findMany({
       where: { workspaceId },
       select: { id: true },
@@ -357,6 +380,137 @@ describe('Bulk job batch processing (e2e)', () => {
     ).toBe(2);
     await expectCounterInvariant(fixture.jobId);
   });
+
+  it('yields a large job so another eligible job runs before it completes', async () => {
+    const largeJob = await createFixture(
+      Array.from({ length: 11 }, () => ({})),
+    );
+    const otherJob = await createFixture([{}]);
+    await prisma.bulkJob.updateMany({
+      where: { id: { in: [largeJob.jobId, otherJob.jobId] } },
+      data: {
+        status: BulkJobStatus.queued,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      },
+    });
+
+    const processingOrder: string[] = [];
+    let persistedAtYield:
+      | {
+          status: BulkJobStatus;
+          processedCount: number;
+          movedCount: number;
+          skippedCount: number;
+          failedCount: number;
+        }
+      | undefined;
+    let requestWorkerShutdown = (): void => {};
+    const workerProcessing = {
+      processBatch: async (leaseToken: ProcessingFixture['token']) => {
+        processingOrder.push(leaseToken.jobId);
+        const result = await processing.processBatch(leaseToken);
+        if (
+          leaseToken.jobId === largeJob.jobId &&
+          processingOrder.filter((jobId) => jobId === largeJob.jobId).length ===
+            5
+        ) {
+          const job = await prisma.bulkJob.findUniqueOrThrow({
+            where: { id: largeJob.jobId },
+          });
+          persistedAtYield = {
+            status: job.status,
+            processedCount: job.processedCount,
+            movedCount: job.movedCount,
+            skippedCount: job.skippedCount,
+            failedCount: job.failedCount,
+          };
+        }
+        if (
+          leaseToken.jobId === largeJob.jobId &&
+          result.kind === 'processed' &&
+          result.status === BulkJobStatus.completed
+        ) {
+          requestWorkerShutdown();
+        }
+        return result;
+      },
+    };
+    const worker = new BulkJobWorkerService(
+      leases,
+      workerProcessing as unknown as BulkJobProcessingService,
+      {
+        workerId: 'worker-quantum-e2e',
+        pollIntervalMs: 100,
+        leaseDurationMs: 120_000,
+      },
+    );
+    requestWorkerShutdown = () => worker.requestShutdown();
+
+    await worker.run();
+
+    expect(processingOrder).toEqual([
+      largeJob.jobId,
+      largeJob.jobId,
+      largeJob.jobId,
+      largeJob.jobId,
+      largeJob.jobId,
+      otherJob.jobId,
+      largeJob.jobId,
+    ]);
+    expect(persistedAtYield).toEqual({
+      status: BulkJobStatus.running,
+      processedCount: 10,
+      movedCount: 10,
+      skippedCount: 0,
+      failedCount: 0,
+    });
+
+    const largeJobRecord = await prisma.bulkJob.findUniqueOrThrow({
+      where: { id: largeJob.jobId },
+    });
+    expect(largeJobRecord).toMatchObject({
+      status: BulkJobStatus.completed,
+      matchedCount: 11,
+      processedCount: 11,
+      movedCount: 11,
+      skippedCount: 0,
+      failedCount: 0,
+    });
+    const largeItems = await prisma.bulkJobItem.findMany({
+      where: { jobId: largeJob.jobId },
+    });
+    expect(largeItems).toHaveLength(11);
+    expect(
+      largeItems.every((item) => item.status === BulkJobItemStatus.moved),
+    ).toBe(true);
+    const largeTransitions = await prisma.opportunityTransition.findMany({
+      where: { workspaceId, operationId: largeJob.jobId },
+    });
+    expect(largeTransitions).toHaveLength(11);
+    expect(
+      largeTransitions.every(
+        (transition) => transition.source === TransitionSource.bulk,
+      ),
+    ).toBe(true);
+    await expectCounterInvariant(largeJob.jobId);
+
+    const otherJobRecord = await prisma.bulkJob.findUniqueOrThrow({
+      where: { id: otherJob.jobId },
+    });
+    expect(otherJobRecord).toMatchObject({
+      status: BulkJobStatus.completed,
+      matchedCount: 1,
+      processedCount: 1,
+      movedCount: 1,
+    });
+    expect(
+      await prisma.opportunityTransition.count({
+        where: { workspaceId, operationId: otherJob.jobId },
+      }),
+    ).toBe(1);
+    await expectCounterInvariant(otherJob.jobId);
+  }, 30_000);
 
   it('updates stage versions, transition ownership, counts, and terminal status atomically', async () => {
     const fixture = await createFixture([{}]);
@@ -909,6 +1063,209 @@ describe('Bulk job batch processing (e2e)', () => {
     });
     await expectCounterInvariant(fixture.jobId);
   }, 30_000);
+
+  it('lets a bulk move win a deterministic race with a stale manual stage edit', async () => {
+    const fixture = await createFixture([{}]);
+    const opportunityId = fixture.opportunityIds[0]!;
+    const snapshot = await prisma.bulkJobItem.findFirstOrThrow({
+      where: { jobId: fixture.jobId },
+    });
+    expect(snapshot).toMatchObject({
+      opportunityId,
+      expectedStageId: sourceStageId,
+      expectedStageVersion: 1,
+      status: BulkJobItemStatus.pending,
+    });
+    let releaseAdvisoryLock!: () => void;
+    const advisoryLockReleased = new Promise<void>((resolve) => {
+      releaseAdvisoryLock = resolve;
+    });
+    let signalLockHolderReady!: (pid: number) => void;
+    let signalLockHolderFailed!: (error: unknown) => void;
+    const lockHolderReady = new Promise<number>((resolve, reject) => {
+      signalLockHolderReady = resolve;
+      signalLockHolderFailed = reject;
+    });
+    let lockHolderPromise: Promise<void> | undefined;
+    let processingPromise:
+      ReturnType<BulkJobProcessingService['processBatch']> | undefined;
+    let manualPromise: Promise<unknown> | undefined;
+
+    try {
+      await prisma.$executeRaw`
+        DROP TRIGGER IF EXISTS "bulk_manual_race_test" ON "Opportunity"
+      `;
+      await prisma.$executeRaw`
+        CREATE OR REPLACE FUNCTION "bulk_manual_race_test"()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF NEW."stageVersion" > OLD."stageVersion"
+            AND EXISTS (
+              SELECT 1
+              FROM "Workspace"
+              WHERE "id" = NEW."workspaceId"
+                AND "name" LIKE 'Processing e2e %'
+            ) THEN
+            PERFORM pg_advisory_xact_lock(
+              hashtextextended(NEW."id"::text, 0)
+            );
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+      `;
+      await prisma.$executeRaw`
+        CREATE TRIGGER "bulk_manual_race_test"
+        BEFORE UPDATE ON "Opportunity"
+        FOR EACH ROW
+        EXECUTE FUNCTION "bulk_manual_race_test"()
+      `;
+
+      lockHolderPromise = prisma
+        .$transaction(
+          async (transaction) => {
+            await transaction.$executeRaw`
+              SELECT pg_advisory_xact_lock(
+                hashtextextended(${opportunityId}::text, 0)
+              )
+            `;
+            const [backend] = await transaction.$queryRaw<
+              { pid: number }[]
+            >`SELECT pg_backend_pid() AS "pid"`;
+            if (!backend) {
+              throw new Error('Expected the advisory-lock backend PID.');
+            }
+            signalLockHolderReady(backend.pid);
+            await advisoryLockReleased;
+          },
+          { timeout: 60_000 },
+        )
+        .catch((error: unknown) => {
+          signalLockHolderFailed(error);
+          throw error;
+        });
+      const lockHolderPid = await lockHolderReady;
+
+      processingPromise = processing.processBatch(fixture.token);
+      const processingPid = await waitForDatabaseCondition(async () => {
+        const [backend] = await prisma.$queryRaw<{ pid: number }[]>`
+          SELECT activity.pid AS "pid"
+          FROM pg_stat_activity AS activity
+          WHERE activity.wait_event_type = 'Lock'
+            AND activity.wait_event = 'advisory'
+            AND ${lockHolderPid} = ANY(pg_blocking_pids(activity.pid))
+          LIMIT 1
+        `;
+        return backend?.pid;
+      }, 'the bulk transaction to hold its opportunity lock and wait at the advisory lock');
+
+      manualPromise = request(app.getHttpServer())
+        .patch(`/api/v1/opportunities/${opportunityId}/stage`)
+        .set('X-Workspace-Id', workspaceId)
+        .send({
+          targetStageId: otherStageId,
+          expectedStageVersion: 1,
+        })
+        .then((response) => response);
+
+      await waitForDatabaseCondition(async () => {
+        const [backend] = await prisma.$queryRaw<{ pid: number }[]>`
+          SELECT activity.pid AS "pid"
+          FROM pg_stat_activity AS activity
+          WHERE activity.wait_event_type = 'Lock'
+            AND ${processingPid} = ANY(pg_blocking_pids(activity.pid))
+            AND activity.query ILIKE '%SELECT "stageId", "stageVersion"%'
+            AND activity.query ILIKE '%FOR UPDATE%'
+          LIMIT 1
+        `;
+        return backend?.pid;
+      }, 'the manual stage transaction to block behind the bulk row lock');
+
+      releaseAdvisoryLock();
+      const [processingResult, manualResponse] = await Promise.all([
+        processingPromise,
+        manualPromise,
+      ]);
+
+      expect(processingResult).toMatchObject({
+        kind: 'processed',
+        batchProcessedCount: 1,
+        movedCount: 1,
+        skippedCount: 0,
+        pendingCount: 0,
+        status: BulkJobStatus.completed,
+      });
+      expect(manualResponse).toMatchObject({
+        status: 409,
+        body: { code: 'stage_version_conflict' },
+      });
+
+      const opportunity = await prisma.opportunity.findUniqueOrThrow({
+        where: { id: opportunityId },
+      });
+      expect(opportunity).toMatchObject({
+        stageId: targetStageId,
+        stageVersion: 2,
+      });
+
+      const item = await prisma.bulkJobItem.findFirstOrThrow({
+        where: { jobId: fixture.jobId },
+      });
+      expect(item).toMatchObject({
+        status: BulkJobItemStatus.moved,
+        outcomeReason: 'moved',
+        attemptCount: 1,
+      });
+
+      const job = await prisma.bulkJob.findUniqueOrThrow({
+        where: { id: fixture.jobId },
+      });
+      expect(job).toMatchObject({
+        matchedCount: 1,
+        processedCount: 1,
+        movedCount: 1,
+        skippedCount: 0,
+        failedCount: 0,
+        status: BulkJobStatus.completed,
+      });
+      await expectCounterInvariant(fixture.jobId);
+
+      const transitions = await prisma.opportunityTransition.findMany({
+        where: { workspaceId, opportunityId },
+      });
+      expect(transitions).toHaveLength(1);
+      expect(transitions[0]).toMatchObject({
+        fromStageId: sourceStageId,
+        toStageId: targetStageId,
+        source: TransitionSource.bulk,
+        operationId: fixture.jobId,
+      });
+    } finally {
+      releaseAdvisoryLock();
+      await Promise.all([
+        lockHolderPromise?.then(
+          () => undefined,
+          () => undefined,
+        ),
+        processingPromise?.then(
+          () => undefined,
+          () => undefined,
+        ),
+        manualPromise?.then(
+          () => undefined,
+          () => undefined,
+        ),
+      ]);
+      await prisma.$executeRaw`
+        DROP TRIGGER IF EXISTS "bulk_manual_race_test" ON "Opportunity"
+      `;
+      await prisma.$executeRaw`
+        DROP FUNCTION IF EXISTS "bulk_manual_race_test"()
+      `;
+    }
+  }, 60_000);
 
   it('does not renew an expired lease after renewal waits behind batch processing', async () => {
     const fixture = await createFixture([{}, { scheduledForFuture: true }]);

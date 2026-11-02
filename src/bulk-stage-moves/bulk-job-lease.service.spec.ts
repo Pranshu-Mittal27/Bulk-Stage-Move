@@ -29,7 +29,7 @@ describe('parseLeaseDurationMs', () => {
   );
 });
 
-describe('BulkJobLeaseService.deferIfNoDueItems', () => {
+describe('BulkJobLeaseService', () => {
   const token: BulkJobLeaseToken = {
     jobId: randomUUID(),
     leaseOwner: 'worker-test',
@@ -37,9 +37,11 @@ describe('BulkJobLeaseService.deferIfNoDueItems', () => {
   };
 
   function createService() {
-    const transaction = { $queryRaw: jest.fn() };
+    const transaction = {
+      $queryRaw: jest.fn<(...args: unknown[]) => Promise<unknown>>(),
+    };
     const prisma = {
-      $queryRaw: jest.fn(),
+      $queryRaw: jest.fn<(...args: unknown[]) => Promise<unknown>>(),
       $transaction: jest.fn(
         async (
           callback: (tx: typeof transaction) => Promise<unknown>,
@@ -50,7 +52,9 @@ describe('BulkJobLeaseService.deferIfNoDueItems', () => {
     return { service, prisma, transaction };
   }
 
-  function validLeaseResponses(transaction: { $queryRaw: jest.Mock }): void {
+  function validLeaseResponses(transaction: {
+    $queryRaw: jest.Mock<(...args: unknown[]) => Promise<unknown>>;
+  }): void {
     transaction.$queryRaw
       .mockResolvedValueOnce([
         {
@@ -178,6 +182,66 @@ describe('BulkJobLeaseService.deferIfNoDueItems', () => {
     await expect(service.deferIfNoDueItems(token)).resolves.toEqual({
       kind: 'lease_lost',
     });
+  });
+
+  it('requeues due pending work and releases only the matching lease', async () => {
+    const { service, transaction } = createService();
+    validLeaseResponses(transaction);
+    transaction.$queryRaw
+      .mockResolvedValueOnce([
+        { pendingCount: 2, dueCount: 1, earliestPendingAt: null },
+      ])
+      .mockResolvedValueOnce([{ id: token.jobId }]);
+
+    await expect(service.yieldAfterQuantum(token)).resolves.toEqual({
+      kind: 'yielded',
+    });
+    expect(transaction.$queryRaw).toHaveBeenCalledTimes(4);
+  });
+
+  it('defers future-only pending work to its earliest item schedule', async () => {
+    const { service, transaction } = createService();
+    const earliestPendingAt = new Date(Date.now() + 60_000);
+    validLeaseResponses(transaction);
+    transaction.$queryRaw
+      .mockResolvedValueOnce([
+        { pendingCount: 2, dueCount: 0, earliestPendingAt },
+      ])
+      .mockResolvedValueOnce([{ id: token.jobId }]);
+
+    await expect(service.yieldAfterQuantum(token)).resolves.toEqual({
+      kind: 'deferred',
+    });
+    expect(transaction.$queryRaw).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not release a lease with no pending items', async () => {
+    const { service, transaction } = createService();
+    validLeaseResponses(transaction);
+    transaction.$queryRaw.mockResolvedValueOnce([
+      { pendingCount: 0, dueCount: 0, earliestPendingAt: null },
+    ]);
+
+    await expect(service.yieldAfterQuantum(token)).resolves.toEqual({
+      kind: 'no_pending_items',
+    });
+    expect(transaction.$queryRaw).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not yield with a stale lease token', async () => {
+    const { service, transaction } = createService();
+    transaction.$queryRaw.mockResolvedValueOnce([
+      {
+        status: 'running',
+        leaseOwner: token.leaseOwner,
+        leaseGeneration: token.leaseGeneration + 1,
+      },
+    ]);
+
+    await expect(service.yieldAfterQuantum(token)).resolves.toEqual({
+      kind: 'lease_lost',
+    });
+    expect(transaction.$queryRaw).toHaveBeenCalledTimes(1);
   });
 
   it('propagates a failure during the final update', async () => {

@@ -3,6 +3,7 @@ import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { AppModule } from '../src/app.module.js';
 import { BulkJobLeaseService } from '../src/bulk-stage-moves/bulk-job-lease.service.js';
+import { BulkJobProcessingService } from '../src/bulk-stage-moves/bulk-job-processing.service.js';
 import { PrismaService } from '../src/database/prisma.service.js';
 import { Prisma } from '../src/generated/prisma/client.js';
 import { BulkJobStatus } from '../src/generated/prisma/enums.js';
@@ -11,6 +12,7 @@ describe('Bulk job lease service (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
   let leases: BulkJobLeaseService;
+  let processing: BulkJobProcessingService;
   let workspaceId: string;
   let stageId: string;
 
@@ -126,6 +128,7 @@ describe('Bulk job lease service (e2e)', () => {
     app = moduleRef.createNestApplication();
     await app.init();
     leases = app.get(BulkJobLeaseService);
+    processing = app.get(BulkJobProcessingService);
   });
 
   afterEach(async () => {
@@ -353,6 +356,111 @@ describe('Bulk job lease service (e2e)', () => {
     });
     expect(persisted.heartbeatAt).toEqual(renewed.heartbeatAt);
     expect(persisted.leaseExpiresAt).toEqual(renewed.leaseExpiresAt);
+  });
+
+  it('yields due work atomically and fences the old token before reclaim', async () => {
+    const created = await createJob();
+    const claim = await leases.claimNext('worker-yielding');
+    expect(claim.kind).toBe('claimed');
+    if (claim.kind !== 'claimed') {
+      throw new Error('Expected the job to be claimed before yielding.');
+    }
+
+    expect(await leases.yieldAfterQuantum(claim.token)).toEqual({
+      kind: 'yielded',
+    });
+    const yielded = await prisma.bulkJob.findUniqueOrThrow({
+      where: { id: created.id },
+    });
+    expect(yielded).toMatchObject({
+      status: BulkJobStatus.queued,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      leaseGeneration: claim.token.leaseGeneration,
+      processedCount: 0,
+      movedCount: 0,
+      nextAttemptAt: null,
+    });
+    expect(await processing.processBatch(claim.token)).toEqual({
+      kind: 'lease_lost',
+    });
+
+    const reclaimed = await leases.claimNext('worker-reclaimed');
+    expect(reclaimed.kind).toBe('claimed');
+    if (reclaimed.kind !== 'claimed') {
+      throw new Error('Expected the yielded job to be claimable again.');
+    }
+    expect(reclaimed.token).toEqual({
+      jobId: created.id,
+      leaseOwner: 'worker-reclaimed',
+      leaseGeneration: claim.token.leaseGeneration + 1,
+    });
+    expect(await processing.processBatch(claim.token)).toEqual({
+      kind: 'lease_lost',
+    });
+  });
+
+  it('preserves future retry schedules when yielding has no due pending items', async () => {
+    const created = await createJob();
+    const secondItemId = await addPendingItem(created.id);
+    await prisma.bulkJobItem.update({
+      where: { itemId: created.itemId },
+      data: { attemptCount: 1, lastErrorCode: 'transaction_conflict' },
+    });
+    await prisma.$executeRaw`
+      UPDATE "BulkJobItem"
+      SET "nextAttemptAt" = CASE
+        WHEN "itemId" = ${created.itemId}
+          THEN clock_timestamp() + INTERVAL '2 minutes'
+        ELSE clock_timestamp() + INTERVAL '1 minute'
+      END
+      WHERE "jobId" = ${created.id}::uuid
+    `;
+    const itemsBefore = await prisma.bulkJobItem.findMany({
+      where: { jobId: created.id },
+      orderBy: { itemId: 'asc' },
+      select: {
+        itemId: true,
+        nextAttemptAt: true,
+        attemptCount: true,
+        lastErrorCode: true,
+      },
+    });
+    const earliest = itemsBefore[1]!.nextAttemptAt!;
+    await setValidLease(created.id, 'worker-yield-deferrer', 9);
+
+    expect(
+      await leases.yieldAfterQuantum({
+        jobId: created.id,
+        leaseOwner: 'worker-yield-deferrer',
+        leaseGeneration: 9,
+      }),
+    ).toEqual({ kind: 'deferred' });
+
+    const job = await prisma.bulkJob.findUniqueOrThrow({
+      where: { id: created.id },
+    });
+    expect(job).toMatchObject({
+      status: BulkJobStatus.queued,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      leaseGeneration: 9,
+      nextAttemptAt: earliest,
+      processedCount: 0,
+    });
+    const itemsAfter = await prisma.bulkJobItem.findMany({
+      where: { jobId: created.id },
+      orderBy: { itemId: 'asc' },
+      select: {
+        itemId: true,
+        nextAttemptAt: true,
+        attemptCount: true,
+        lastErrorCode: true,
+      },
+    });
+    expect(itemsAfter).toEqual(itemsBefore);
+    expect(await leases.claimNext('worker-no-spin')).toEqual({ kind: 'empty' });
+    expect(itemsAfter.map((item) => item.itemId)).toContain(secondItemId);
   });
 
   it('defers future-only pending items to the earliest schedule and preserves job/item metadata', async () => {

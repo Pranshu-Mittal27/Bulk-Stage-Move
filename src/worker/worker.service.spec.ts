@@ -66,6 +66,7 @@ describe('BulkJobWorkerService', () => {
       claimNext: jest.fn(),
       renew: jest.fn(),
       deferIfNoDueItems: jest.fn(),
+      yieldAfterQuantum: jest.fn(),
       findJobsWithoutPendingItems: jest.fn(),
     } as unknown as jest.Mocked<BulkJobLeaseService>;
     processing = {
@@ -119,6 +120,48 @@ describe('BulkJobWorkerService', () => {
     expect(processing.processBatch).toHaveBeenNthCalledWith(2, token);
     expect(leases.renew).toHaveBeenCalledTimes(1);
   });
+
+  it('yields after the fixed batch quantum and returns to claim polling', async () => {
+    leases.claimNext
+      .mockResolvedValueOnce(claimed)
+      .mockImplementationOnce(async () => {
+        worker.requestShutdown();
+        return { kind: 'empty' };
+      });
+    processing.processBatch.mockResolvedValue(processed(BulkJobStatus.running));
+    leases.yieldAfterQuantum.mockResolvedValueOnce({ kind: 'yielded' });
+    worker = new BulkJobWorkerService(leases, processing, config);
+
+    await worker.run();
+
+    expect(processing.processBatch).toHaveBeenCalledTimes(5);
+    expect(leases.yieldAfterQuantum).toHaveBeenCalledWith(token);
+    expect(leases.renew).toHaveBeenCalledTimes(4);
+    expect(leases.claimNext).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([{ kind: 'deferred' as const }, { kind: 'lease_lost' as const }])(
+    'does not reuse the token when quantum yield returns $kind',
+    async (result) => {
+      leases.claimNext
+        .mockResolvedValueOnce(claimed)
+        .mockImplementationOnce(async () => {
+          worker.requestShutdown();
+          return { kind: 'empty' };
+        });
+      processing.processBatch.mockResolvedValue(
+        processed(BulkJobStatus.running),
+      );
+      leases.yieldAfterQuantum.mockResolvedValueOnce(result);
+      worker = new BulkJobWorkerService(leases, processing, config);
+
+      await worker.run();
+
+      expect(processing.processBatch).toHaveBeenCalledTimes(5);
+      expect(leases.yieldAfterQuantum).toHaveBeenCalledTimes(1);
+      expect(leases.renew).toHaveBeenCalledTimes(4);
+    },
+  );
 
   it.each(['completed', 'completed_with_errors', 'failed'] as const)(
     'stops processing on terminal status %s',

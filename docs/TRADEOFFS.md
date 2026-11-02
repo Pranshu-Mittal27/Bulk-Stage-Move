@@ -14,12 +14,12 @@ This document records deliberate scope choices and verified limitations in the t
 
 ## Known limitations and accepted trade-offs
 
-### No explicit fairness policy across workspaces
+### Basic job yielding does not provide workspace fairness
 
-- **Current behavior:** Claims select the oldest eligible jobs by `createdAt` and `id`, using `SKIP LOCKED`. There is no workspace-weighted, round-robin, or starvation-prevention policy.
-- **Impact:** Under sustained load, one workspace with many older eligible jobs could occupy available workers ahead of other work. This is a risk scenario, not a measured issue.
-- **Why deferred:** Deterministic ordering is simple to understand and sufficient for the demonstrated queue behavior; a fairness policy needs workload and service-priority requirements.
-- **Possible next-week improvement:** Measure queue wait time by workspace under a representative mixed-workload test, agree on a fairness objective, then evaluate the smallest scheduling change that meets it.
+- **Current behavior:** A worker yields after at most five completed batches or recorded retry attempts when pending work remains. Empty polls while due rows are locked do not consume the quantum. Eligible jobs are ordered by oldest `lastProgressAt`, falling back to `createdAt`, using `SKIP LOCKED`. This lets older-waiting eligible jobs run before a recently progressed job, but does not weight or partition by workspace.
+- **Impact:** The bounded quantum improves job-level scheduling opportunities but does not guarantee strict fairness or prevent starvation. A busy workspace can still consume worker capacity, and all workers still share database resources with the API.
+- **Why limited:** A small fixed quantum and existing progress timestamp avoid schema and infrastructure changes while preserving the durable lease model. They do not implement a tenant-level scheduling policy.
+- **Possible next-week improvement:** Measure queue wait time by workspace under a representative mixed-workload test, agree on a fairness objective, then evaluate whether workspace-aware scheduling is warranted.
 
 ### Due work can cause polling when its item rows remain locked
 
@@ -51,9 +51,9 @@ This document records deliberate scope choices and verified limitations in the t
 
 ### One active job per worker process and fixed batch size
 
-- **Current behavior:** Each worker process claims one job and processes its batches sequentially. Batch size is fixed for that process through `BULK_JOB_BATCH_SIZE` (default 100, bounded from 1 to 500). Multiple worker processes can run concurrently.
-- **Impact:** A single large job occupies a process until it completes or yields; the chosen batch size is not automatically adjusted to database load or job size.
-- **Why deferred:** Sequential processing and a bounded batch limit keep the transaction and worker loop understandable while allowing deployment-time batch sizing and multiple worker processes.
+- **Current behavior:** Each worker process claims one job and processes up to five completed batches or recorded retry attempts before yielding pending work. Batch size is fixed for that process through `BULK_JOB_BATCH_SIZE` (default 100, bounded from 1 to 500). Multiple worker processes can run concurrently.
+- **Impact:** Yielding gives other eligible jobs an opportunity to run, but does not reserve database capacity for API traffic or guarantee interactive latency. The chosen batch size and quantum are not automatically adjusted to database load or job size.
+- **Why limited:** Sequential processing with a fixed, bounded quantum keeps transactions and worker logic understandable while allowing deployment-time batch sizing and multiple worker processes.
 - **Possible next-week improvement:** Benchmark representative job sizes and worker counts, inspect database contention and latency, then tune the batch size or process count based on measured results.
 
 ## Not intentionally weakened

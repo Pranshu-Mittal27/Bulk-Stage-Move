@@ -42,6 +42,12 @@ export type DeferBulkJobResult =
   | { kind: 'due_items_remain' }
   | { kind: 'no_pending_items' };
 
+export type YieldBulkJobResult =
+  | { kind: 'yielded' }
+  | { kind: 'deferred' }
+  | { kind: 'lease_lost' }
+  | { kind: 'no_pending_items' };
+
 export interface BulkJobWithoutPendingItems {
   id: string;
   status: BulkJobStatus;
@@ -167,7 +173,10 @@ export class BulkJobLeaseService {
                     OR item."nextAttemptAt" <= candidate_time."now"
                   )
               )
-            ORDER BY job."createdAt" ASC, job."id" ASC
+            ORDER BY
+              COALESCE(job."lastProgressAt", job."createdAt") ASC,
+              job."createdAt" ASC,
+              job."id" ASC
             LIMIT 1
             FOR UPDATE OF job SKIP LOCKED
           `,
@@ -456,6 +465,108 @@ export class BulkJobLeaseService {
         }
 
         return { kind: 'deferred' };
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        maxWait: leaseTransactionMaxWaitMs,
+        timeout: leaseTransactionTimeoutMs,
+      },
+    );
+  }
+
+  async yieldAfterQuantum(
+    token: BulkJobLeaseToken,
+  ): Promise<YieldBulkJobResult> {
+    validateBulkJobLeaseToken(token);
+    return this.prisma.$transaction(
+      async (transaction): Promise<YieldBulkJobResult> => {
+        const currentJobs = await transaction.$queryRaw<CurrentLeaseRow[]>(
+          Prisma.sql`
+            SELECT
+              "status" AS "status",
+              "leaseOwner" AS "leaseOwner",
+              "leaseGeneration" AS "leaseGeneration"
+            FROM "BulkJob"
+            WHERE "id" = ${token.jobId}::uuid
+            FOR UPDATE
+          `,
+        );
+        const current = currentJobs[0];
+        if (
+          !current ||
+          current.status !== BulkJobStatus.running ||
+          current.leaseOwner !== token.leaseOwner ||
+          current.leaseGeneration !== token.leaseGeneration
+        ) {
+          return { kind: 'lease_lost' };
+        }
+
+        const validity = await transaction.$queryRaw<{ valid: boolean }[]>(
+          Prisma.sql`
+            SELECT "leaseExpiresAt" > clock_timestamp() AS "valid"
+            FROM "BulkJob"
+            WHERE "id" = ${token.jobId}::uuid
+          `,
+        );
+        if (!validity[0]?.valid) {
+          return { kind: 'lease_lost' };
+        }
+
+        const classifications = await transaction.$queryRaw<
+          PendingItemClassificationRow[]
+        >(
+          Prisma.sql`
+            WITH classification_time AS MATERIALIZED (
+              SELECT clock_timestamp() AS "now"
+            )
+            SELECT
+              COUNT(*)::int AS "pendingCount",
+              COUNT(*) FILTER (
+                WHERE item."nextAttemptAt" IS NULL
+                  OR item."nextAttemptAt" <= classification_time."now"
+              )::int AS "dueCount",
+              MIN(item."nextAttemptAt") AS "earliestPendingAt"
+            FROM "BulkJobItem" AS item
+            CROSS JOIN classification_time
+            WHERE item."jobId" = ${token.jobId}::uuid
+              AND item."status" = 'pending'::"BulkJobItemStatus"
+          `,
+        );
+        const classification = classifications[0];
+        if (!classification || classification.pendingCount === 0) {
+          return { kind: 'no_pending_items' };
+        }
+
+        const isDeferred = classification.dueCount === 0;
+        if (isDeferred && classification.earliestPendingAt === null) {
+          throw new Error(
+            'Future-only pending items must have a non-null nextAttemptAt.',
+          );
+        }
+
+        const updated = await transaction.$queryRaw<UpdatedJobRow[]>(
+          Prisma.sql`
+            UPDATE "BulkJob"
+            SET
+              "status" = 'queued'::"BulkJobStatus",
+              "nextAttemptAt" = ${
+                isDeferred ? classification.earliestPendingAt : null
+              },
+              "leaseOwner" = NULL,
+              "leaseExpiresAt" = NULL
+            WHERE "id" = ${token.jobId}::uuid
+              AND "status" = 'running'::"BulkJobStatus"
+              AND "leaseOwner" = ${token.leaseOwner}
+              AND "leaseGeneration" = ${token.leaseGeneration}
+              AND "leaseExpiresAt" > clock_timestamp()
+            RETURNING "id" AS "id"
+          `,
+        );
+        if (updated.length !== 1) {
+          return { kind: 'lease_lost' };
+        }
+
+        return isDeferred ? { kind: 'deferred' } : { kind: 'yielded' };
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
