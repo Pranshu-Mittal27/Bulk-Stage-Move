@@ -17,6 +17,7 @@ const maximumBatchSize = 500;
 const defaultRetryBackoffMs = 30_000;
 const minimumRetryBackoffMs = 1_000;
 const maximumRetryBackoffMs = 3_600_000;
+const MAX_ITEM_ATTEMPTS = 5;
 const transactionTimeoutMs = 60_000;
 const transactionMaxWaitMs = 10_000;
 
@@ -226,6 +227,9 @@ export class BulkJobProcessingService {
             SELECT "leaseExpiresAt" > clock_timestamp() AS "valid"
             FROM "BulkJob"
             WHERE "id" = ${token.jobId}::uuid
+              AND "status" = 'running'::"BulkJobStatus"
+              AND "leaseOwner" = ${token.leaseOwner}
+              AND "leaseGeneration" = ${token.leaseGeneration}
           `);
           if (!leaseValidity[0]?.valid) {
             return { kind: 'lease_lost' };
@@ -263,6 +267,7 @@ export class BulkJobProcessingService {
 
           let movedCount = 0;
           let skippedCount = 0;
+          let failedCount = 0;
           const opportunityLockOrder = [...items].sort((left, right) =>
             left.opportunityId < right.opportunityId
               ? -1
@@ -273,6 +278,30 @@ export class BulkJobProcessingService {
 
           for (const item of opportunityLockOrder) {
             activeItem = item;
+            if (item.attemptCount >= MAX_ITEM_ATTEMPTS) {
+              const itemUpdate = await transaction.bulkJobItem.updateMany({
+                where: {
+                  jobId: job.id,
+                  itemId: item.itemId,
+                  status: BulkJobItemStatus.pending,
+                },
+                data: {
+                  status: BulkJobItemStatus.failed,
+                  nextAttemptAt: null,
+                  outcomeReason: 'max_attempts_exceeded',
+                  processedAt: new Date(),
+                },
+              });
+              if (itemUpdate.count !== 1) {
+                throw new Error(
+                  'A selected exhausted bulk snapshot item was no longer pending.',
+                );
+              }
+              failedCount += 1;
+              activeItem = undefined;
+              continue;
+            }
+
             const opportunities = await transaction.$queryRaw<
               LockedOpportunityRow[]
             >(
@@ -351,7 +380,6 @@ export class BulkJobProcessingService {
               },
               data: {
                 status: itemStatus,
-                attemptCount: { increment: 1 },
                 nextAttemptAt: null,
                 outcomeReason,
                 lastErrorCode: null,
@@ -372,14 +400,15 @@ export class BulkJobProcessingService {
               status: BulkJobItemStatus.pending,
             },
           });
-          const batchProcessedCount = movedCount + skippedCount;
+          const batchProcessedCount = movedCount + skippedCount + failedCount;
           const processedCount = job.processedCount + batchProcessedCount;
           const totalTerminalOutcomes =
             job.movedCount +
             movedCount +
             job.skippedCount +
             skippedCount +
-            job.failedCount;
+            job.failedCount +
+            failedCount;
           if (
             processedCount > job.matchedCount ||
             totalTerminalOutcomes !== processedCount
@@ -390,7 +419,7 @@ export class BulkJobProcessingService {
           const isComplete =
             pendingItems === 0 && processedCount === job.matchedCount;
           const terminalStatus =
-            job.failedCount > 0
+            job.failedCount + failedCount > 0
               ? BulkJobStatus.completed_with_errors
               : BulkJobStatus.completed;
           const updatedJobs = await transaction.$queryRaw<UpdatedBulkJobRow[]>(
@@ -400,6 +429,7 @@ export class BulkJobProcessingService {
               "processedCount" = "processedCount" + ${batchProcessedCount},
               "movedCount" = "movedCount" + ${movedCount},
               "skippedCount" = "skippedCount" + ${skippedCount},
+              "failedCount" = "failedCount" + ${failedCount},
               "lastProgressAt" = clock_timestamp(),
               "status" = CASE
                 WHEN ${isComplete} THEN ${terminalStatus}::"BulkJobStatus"
@@ -517,6 +547,107 @@ export class BulkJobProcessingService {
         );
         if (!validity[0]?.valid) {
           return 'lease_lost';
+        }
+
+        if (previousAttemptCount + 1 >= MAX_ITEM_ATTEMPTS) {
+          const failedItems = await transaction.$queryRaw<
+            { itemId: bigint }[]
+          >(Prisma.sql`
+            UPDATE "BulkJobItem" AS item
+            SET
+              "attemptCount" = item."attemptCount" + 1,
+              "status" = 'failed'::"BulkJobItemStatus",
+              "lastErrorCode" = ${errorCode},
+              "nextAttemptAt" = NULL,
+              "outcomeReason" = 'max_attempts_exceeded',
+              "processedAt" = clock_timestamp()
+            WHERE item."jobId" = ${token.jobId}::uuid
+              AND item."itemId" = ${itemId}
+              AND item."status" = 'pending'::"BulkJobItemStatus"
+              AND item."attemptCount" = ${previousAttemptCount}
+              AND item."attemptCount" < 2147483647
+              AND EXISTS (
+                SELECT 1
+                FROM "BulkJob" AS job
+                WHERE job."id" = item."jobId"
+                  AND job."status" = 'running'::"BulkJobStatus"
+                  AND job."leaseOwner" = ${token.leaseOwner}
+                  AND job."leaseGeneration" = ${token.leaseGeneration}
+                  AND job."leaseExpiresAt" > clock_timestamp()
+              )
+            RETURNING item."itemId" AS "itemId"
+          `);
+          if (failedItems.length !== 1) {
+            const stillValid = await transaction.$queryRaw<
+              { valid: boolean }[]
+            >(Prisma.sql`
+              SELECT "leaseExpiresAt" > clock_timestamp() AS "valid"
+              FROM "BulkJob"
+              WHERE "id" = ${token.jobId}::uuid
+                AND "status" = 'running'::"BulkJobStatus"
+                AND "leaseOwner" = ${token.leaseOwner}
+                AND "leaseGeneration" = ${token.leaseGeneration}
+            `);
+            return stillValid[0]?.valid ? 'item_not_pending' : 'lease_lost';
+          }
+
+          const pendingCount = await transaction.bulkJobItem.count({
+            where: {
+              jobId: token.jobId,
+              status: BulkJobItemStatus.pending,
+            },
+          });
+          const updatedJobs = await transaction.$queryRaw<
+            UpdatedBulkJobRow[]
+          >(Prisma.sql`
+            UPDATE "BulkJob" AS job
+            SET
+              "processedCount" = job."processedCount" + 1,
+              "failedCount" = job."failedCount" + 1,
+              "lastProgressAt" = clock_timestamp(),
+              "status" = CASE
+                WHEN ${pendingCount} = 0
+                  AND job."processedCount" + 1 = job."matchedCount"
+                  AND job."failedCount" + 1 > 0
+                THEN 'completed_with_errors'::"BulkJobStatus"
+                ELSE job."status"
+              END,
+              "completedAt" = CASE
+                WHEN ${pendingCount} = 0
+                  AND job."processedCount" + 1 = job."matchedCount"
+                THEN clock_timestamp()
+                ELSE job."completedAt"
+              END,
+              "leaseOwner" = CASE
+                WHEN ${pendingCount} = 0
+                  AND job."processedCount" + 1 = job."matchedCount"
+                THEN NULL
+                ELSE job."leaseOwner"
+              END,
+              "leaseExpiresAt" = CASE
+                WHEN ${pendingCount} = 0
+                  AND job."processedCount" + 1 = job."matchedCount"
+                THEN NULL
+                ELSE job."leaseExpiresAt"
+              END
+            WHERE job."id" = ${token.jobId}::uuid
+              AND job."status" = 'running'::"BulkJobStatus"
+              AND job."leaseOwner" = ${token.leaseOwner}
+              AND job."leaseGeneration" = ${token.leaseGeneration}
+              AND job."leaseExpiresAt" > clock_timestamp()
+            RETURNING job."status" AS "status",
+              job."processedCount" AS "processedCount",
+              job."movedCount" AS "movedCount",
+              job."skippedCount" AS "skippedCount",
+              job."failedCount" AS "failedCount",
+              job."matchedCount" AS "matchedCount"
+          `);
+          if (updatedJobs.length !== 1) {
+            throw new Error(
+              'The bulk job lease changed while recording an exhausted item failure.',
+            );
+          }
+          return 'recorded';
         }
 
         const updatedItems = await transaction.$queryRaw<{ itemId: bigint }[]>(

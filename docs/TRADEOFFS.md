@@ -6,11 +6,15 @@ This document records deliberate scope choices and verified limitations in the t
 
 ## Current design decisions
 
+- **Decision:** Use a fixed internal maximum of five failed processing attempts per item.
+  - **Rationale:** Prevent repeatedly conflicting items from remaining pending indefinitely and make exhaustion visible through the existing item/job status and counter fields without adding configuration or infrastructure.
+  - **Alternatives considered:** Unlimited retries, an environment-configurable retry limit, and a separate dead-letter/retry subsystem.
+  - **Trade-offs:** A repeatedly conflicting item may become failed even if the underlying database conflict could eventually resolve. The fifth retryable attempt is deliberately terminal; infrastructure, connection, timeout, and unknown errors are still left on the worker error path rather than being misclassified as item failures.
 - PostgreSQL is the system of record for opportunities, bulk-job snapshots, item outcomes, progress, and the durable job queue. The worker uses the same database; no external queue is required.
 - Submission persists a workspace-scoped idempotency key and a snapshot of matching opportunities with their expected stage and version. The submission transaction enforces the 50,000-item maximum.
 - The worker processes bounded batches sequentially. Successful stage changes, transition history, item outcomes, and progress changes are committed atomically.
 - Job claims and mutations use PostgreSQL transactions, row locks, lease expiry checks, and generation fencing. Item-level retry schedules determine eligibility; the job-level schedule is only a hint.
-- Recognized transient database conflicts receive a finite retry delay. Other batch failures roll back and are surfaced rather than silently converted into item outcomes.
+- Recognized transient database conflicts receive a finite retry delay and are retried at most five failed processing attempts per item. Other batch failures roll back and are surfaced rather than silently converted into item outcomes.
 
 ## Known limitations and accepted trade-offs
 

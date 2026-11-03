@@ -47,37 +47,6 @@ class TestMetadataFailureProcessingService extends BulkJobProcessingService {
   }
 }
 
-class TestStaleLeaseProcessingService extends BulkJobProcessingService {
-  constructor(
-    private readonly database: PrismaService,
-    private readonly jobId: string,
-  ) {
-    super(database);
-  }
-
-  protected override async recordRetryableAttempt(
-    token: ProcessingFixture['token'],
-    itemId: bigint,
-    previousAttemptCount: number,
-    errorCode: string,
-  ): Promise<RetryMetadataStatus> {
-    await this.database.bulkJob.update({
-      where: { id: this.jobId },
-      data: {
-        leaseOwner: 'reclaimed-worker',
-        leaseGeneration: token.leaseGeneration + 1,
-        leaseExpiresAt: new Date(Date.now() + 60_000),
-      },
-    });
-    return super.recordRetryableAttempt(
-      token,
-      itemId,
-      previousAttemptCount,
-      errorCode,
-    );
-  }
-}
-
 describe('Bulk job batch processing (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
@@ -250,6 +219,12 @@ describe('Bulk job batch processing (e2e)', () => {
     await prisma.$executeRaw`
       DROP FUNCTION IF EXISTS "bulk_processing_retry_test"()
     `;
+    await prisma.$executeRaw`
+      DROP TRIGGER IF EXISTS "bulk_processing_item_update_test" ON "BulkJobItem"
+    `;
+    await prisma.$executeRaw`
+      DROP FUNCTION IF EXISTS "bulk_processing_item_update_test"()
+    `;
   }
 
   beforeAll(async () => {
@@ -290,6 +265,18 @@ describe('Bulk job batch processing (e2e)', () => {
   });
 
   afterEach(async () => {
+    await prisma.$executeRaw`
+      DROP TRIGGER IF EXISTS "bulk_processing_reclaim_test" ON "BulkJobItem"
+    `;
+    await prisma.$executeRaw`
+      DROP FUNCTION IF EXISTS "bulk_processing_reclaim_test"()
+    `;
+    await prisma.$executeRaw`
+      DROP TRIGGER IF EXISTS "bulk_processing_job_failure_test" ON "BulkJob"
+    `;
+    await prisma.$executeRaw`
+      DROP FUNCTION IF EXISTS "bulk_processing_job_failure_test"()
+    `;
     await prisma.$executeRaw`
       DROP TRIGGER IF EXISTS "bulk_processing_retry_test" ON "OpportunityTransition"
     `;
@@ -740,12 +727,37 @@ describe('Bulk job batch processing (e2e)', () => {
 
   it('rolls back the entire batch if an item update fails', async () => {
     const fixture = await createFixture([{}, {}]);
-    await prisma.bulkJobItem.update({
-      where: { itemId: fixture.itemIds[1]! },
-      data: { attemptCount: 2_147_483_647 },
-    });
+    await prisma.$executeRaw`
+      CREATE OR REPLACE FUNCTION "bulk_processing_item_update_test"()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF NEW."status" IN ('moved'::"BulkJobItemStatus", 'skipped'::"BulkJobItemStatus") THEN
+          RAISE EXCEPTION 'simulated item update failure'
+            USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+      END;
+      $$
+    `;
+    await prisma.$executeRaw`
+      CREATE TRIGGER "bulk_processing_item_update_test"
+      BEFORE UPDATE ON "BulkJobItem"
+      FOR EACH ROW
+      EXECUTE FUNCTION "bulk_processing_item_update_test"()
+    `;
 
-    await expect(processing.processBatch(fixture.token)).rejects.toThrow();
+    try {
+      await expect(processing.processBatch(fixture.token)).rejects.toThrow();
+    } finally {
+      await prisma.$executeRaw`
+        DROP TRIGGER IF EXISTS "bulk_processing_item_update_test" ON "BulkJobItem"
+      `;
+      await prisma.$executeRaw`
+        DROP FUNCTION IF EXISTS "bulk_processing_item_update_test"()
+      `;
+    }
 
     for (const opportunityId of fixture.opportunityIds) {
       const opportunity = await prisma.opportunity.findUniqueOrThrow({
@@ -841,6 +853,150 @@ describe('Bulk job batch processing (e2e)', () => {
     await expectCounterInvariant(fixture.jobId);
   });
 
+  it('fails an item atomically on its fifth retryable attempt', async () => {
+    const fixture = await createFixture([{}]);
+    await prisma.bulkJobItem.updateMany({
+      where: { jobId: fixture.jobId },
+      data: { attemptCount: 4 },
+    });
+    await installConflictTrigger();
+
+    try {
+      await expect(processing.processBatch(fixture.token)).rejects.toThrow();
+    } finally {
+      await removeConflictTrigger();
+    }
+
+    const item = await prisma.bulkJobItem.findFirstOrThrow({
+      where: { jobId: fixture.jobId },
+    });
+    expect(item).toMatchObject({
+      status: BulkJobItemStatus.failed,
+      attemptCount: 5,
+      nextAttemptAt: null,
+      outcomeReason: 'max_attempts_exceeded',
+      lastErrorCode: 'transaction_conflict',
+    });
+    expect(item.processedAt).toBeInstanceOf(Date);
+
+    const job = await prisma.bulkJob.findUniqueOrThrow({
+      where: { id: fixture.jobId },
+    });
+    expect(job).toMatchObject({
+      status: BulkJobStatus.completed_with_errors,
+      processedCount: 1,
+      failedCount: 1,
+      movedCount: 0,
+      skippedCount: 0,
+    });
+    expect(job.completedAt).toBeInstanceOf(Date);
+    await expectCounterInvariant(fixture.jobId);
+  });
+
+  it('preserves mixed moved and failed outcomes at job terminalization', async () => {
+    const fixture = await createFixture([{}, {}]);
+    const firstOpportunityId = [...fixture.opportunityIds].sort()[0];
+    const firstItemIndex = fixture.opportunityIds.indexOf(firstOpportunityId!);
+    await prisma.bulkJobItem.update({
+      where: {
+        jobId_itemId: {
+          jobId: fixture.jobId,
+          itemId: fixture.itemIds[firstItemIndex]!,
+        },
+      },
+      data: { attemptCount: 4 },
+    });
+    await installConflictTrigger();
+
+    try {
+      await expect(processing.processBatch(fixture.token)).rejects.toThrow();
+    } finally {
+      await removeConflictTrigger();
+    }
+
+    const failedItem = await prisma.bulkJobItem.findFirstOrThrow({
+      where: { jobId: fixture.jobId, status: BulkJobItemStatus.failed },
+    });
+    expect(failedItem.attemptCount).toBe(5);
+
+    const result = await processing.processBatch(fixture.token);
+    expect(result).toMatchObject({
+      kind: 'processed',
+      batchProcessedCount: 1,
+      movedCount: 1,
+      pendingCount: 0,
+      status: BulkJobStatus.completed_with_errors,
+    });
+
+    const job = await prisma.bulkJob.findUniqueOrThrow({
+      where: { id: fixture.jobId },
+    });
+    expect(job.processedCount).toBe(2);
+    expect(job.failedCount).toBe(1);
+    expect(job.movedCount).toBe(1);
+    expect(job.skippedCount).toBe(0);
+    await expectCounterInvariant(fixture.jobId);
+  });
+
+  it('does not record fifth-attempt counters when the terminal transaction fails', async () => {
+    const fixture = await createFixture([{}]);
+    await prisma.bulkJobItem.updateMany({
+      where: { jobId: fixture.jobId },
+      data: { attemptCount: 4 },
+    });
+    await installConflictTrigger();
+    await prisma.$executeRaw`
+      CREATE OR REPLACE FUNCTION "bulk_processing_job_failure_test"()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF NEW."failedCount" > OLD."failedCount" THEN
+          RAISE EXCEPTION 'simulated terminal accounting failure'
+            USING ERRCODE = '40001';
+        END IF;
+        RETURN NEW;
+      END;
+      $$
+    `;
+    await prisma.$executeRaw`
+      CREATE TRIGGER "bulk_processing_job_failure_test"
+      BEFORE UPDATE ON "BulkJob"
+      FOR EACH ROW
+      EXECUTE FUNCTION "bulk_processing_job_failure_test"()
+    `;
+
+    let caught: unknown;
+    try {
+      await processing.processBatch(fixture.token);
+    } catch (error) {
+      caught = error;
+    } finally {
+      await removeConflictTrigger();
+      await prisma.$executeRaw`
+        DROP TRIGGER IF EXISTS "bulk_processing_job_failure_test" ON "BulkJob"
+      `;
+      await prisma.$executeRaw`
+        DROP FUNCTION IF EXISTS "bulk_processing_job_failure_test"()
+      `;
+    }
+
+    expect(caught).toBeInstanceOf(RetryableBulkJobProcessingError);
+    const item = await prisma.bulkJobItem.findFirstOrThrow({
+      where: { jobId: fixture.jobId },
+    });
+    expect(item.status).toBe(BulkJobItemStatus.pending);
+    expect(item.attemptCount).toBe(4);
+    expect(item.nextAttemptAt).toBeNull();
+
+    const job = await prisma.bulkJob.findUniqueOrThrow({
+      where: { id: fixture.jobId },
+    });
+    expect(job.processedCount).toBe(0);
+    expect(job.failedCount).toBe(0);
+    await expectCounterInvariant(fixture.jobId);
+  });
+
   it('preserves the processing error when retry metadata recording also fails', async () => {
     const fixture = await createFixture([{}]);
     await installConflictTrigger();
@@ -899,21 +1055,52 @@ describe('Bulk job batch processing (e2e)', () => {
     ).toBe(0);
   });
 
-  it('does not record retry metadata after lease ownership changes during rollback', async () => {
+  it('returns lease_lost when the fifth-attempt fallback encounters a reclaimed lease', async () => {
     const fixture = await createFixture([{}]);
+    await prisma.bulkJobItem.updateMany({
+      where: { jobId: fixture.jobId },
+      data: { attemptCount: 4 },
+    });
     await installConflictTrigger();
-    const staleLeaseProcessor = new TestStaleLeaseProcessingService(
-      prisma,
-      fixture.jobId,
-    );
+    await prisma.$executeRaw`
+      CREATE OR REPLACE FUNCTION "bulk_processing_reclaim_test"()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF NEW."status" = 'failed'::"BulkJobItemStatus" THEN
+          UPDATE "BulkJob"
+          SET
+            "leaseOwner" = 'reclaimed-worker',
+            "leaseGeneration" = "leaseGeneration" + 1,
+            "leaseExpiresAt" = clock_timestamp() + INTERVAL '1 minute'
+          WHERE "id" = NEW."jobId";
+          RETURN NULL;
+        END IF;
+        RETURN NEW;
+      END;
+      $$
+    `;
+    await prisma.$executeRaw`
+      CREATE TRIGGER "bulk_processing_reclaim_test"
+      BEFORE UPDATE ON "BulkJobItem"
+      FOR EACH ROW
+      EXECUTE FUNCTION "bulk_processing_reclaim_test"()
+    `;
 
     let caught: unknown;
     try {
-      await staleLeaseProcessor.processBatch(fixture.token);
+      await processing.processBatch(fixture.token);
     } catch (error) {
       caught = error;
     } finally {
       await removeConflictTrigger();
+      await prisma.$executeRaw`
+        DROP TRIGGER IF EXISTS "bulk_processing_reclaim_test" ON "BulkJobItem"
+      `;
+      await prisma.$executeRaw`
+        DROP FUNCTION IF EXISTS "bulk_processing_reclaim_test"()
+      `;
     }
 
     expect(caught).toBeInstanceOf(RetryableBulkJobProcessingError);
@@ -926,11 +1113,17 @@ describe('Bulk job batch processing (e2e)', () => {
     expect(job.leaseOwner).toBe('reclaimed-worker');
     expect(job.leaseGeneration).toBe(fixture.token.leaseGeneration + 1);
     expect(job.processedCount).toBe(0);
+    expect(job.failedCount).toBe(0);
+    expect(job.movedCount).toBe(0);
+    expect(job.skippedCount).toBe(0);
+    expect(job.status).toBe(BulkJobStatus.running);
+    expect(job.leaseExpiresAt).toBeInstanceOf(Date);
+    expect(job.leaseExpiresAt!.getTime()).toBeGreaterThan(Date.now());
     const item = await prisma.bulkJobItem.findFirstOrThrow({
       where: { jobId: fixture.jobId },
     });
     expect(item.status).toBe(BulkJobItemStatus.pending);
-    expect(item.attemptCount).toBe(0);
+    expect(item.attemptCount).toBe(4);
     expect(item.lastErrorCode).toBeNull();
     expect(item.nextAttemptAt).toBeNull();
     expect(
@@ -1216,7 +1409,7 @@ describe('Bulk job batch processing (e2e)', () => {
       expect(item).toMatchObject({
         status: BulkJobItemStatus.moved,
         outcomeReason: 'moved',
-        attemptCount: 1,
+        attemptCount: 0,
       });
 
       const job = await prisma.bulkJob.findUniqueOrThrow({
