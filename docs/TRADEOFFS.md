@@ -44,7 +44,7 @@ This document records deliberate scope choices and verified limitations in the t
 
 ### Production-scale behavior remains unverified
 
-- **Current behavior:** The repository includes the `benchmark:bulk` command and a reproducible benchmark harness. The latest local 50,000-item bulk and operator-attested crash/recovery runs are documented in `docs/BENCHMARKS.md`; no baseline and during-bulk result pair is included in the current final report. Adding baseline comparisons remains future work.
+- **Current behavior:** The repository includes the `benchmark:bulk` command and a reproducible benchmark harness. The latest local 50,000-item bulk and operator-attested crash/recovery runs are documented in `BENCHMARKS.md`; no baseline and during-bulk result pair is included in the current final report. Adding baseline comparisons remains future work.
 - **Impact:** These single local runs provide observed persisted end-to-end throughput and interactive latency for the tested workload. They do not establish isolated worker processing rate, production-scale capacity, performance at larger data volumes, or a stable causal estimate of bulk work's latency impact. Database contention and bottlenecks remain unverified.
 - **Why deferred:** Correctness and transaction behavior were established first. The initial local measurements are not repeated or representative-environment evidence for production performance claims.
 - **Possible next-week improvement:** Repeat the documented scenarios and test representative mixed/higher-load workloads in a representative environment; record hardware and configuration, and inspect contention before tuning or making capacity claims.

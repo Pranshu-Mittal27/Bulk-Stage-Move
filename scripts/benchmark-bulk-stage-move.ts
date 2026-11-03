@@ -944,6 +944,7 @@ function printHelp(): void {
   console.log(
     [
       'Usage: npm run benchmark:bulk -- <baseline|bulk|crash-start|crash-resume> [options]',
+      'Mutation confirmation: --confirm-benchmark is required for bulk and crash-start.',
       'Common options: --base-url --large-workspace-id --large-stage-id',
       '  --small-workspace-id --small-stage-id --source-stage-id --target-stage-id',
       '  --target-count 50000 --request-rate 2 --concurrency 1',

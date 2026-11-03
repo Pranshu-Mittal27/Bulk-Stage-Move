@@ -10,7 +10,9 @@ An ESM-first NestJS and PostgreSQL service with workspace-scoped opportunity API
 
 ## Setup
 
-### One-command disposable test setup
+> **Database safety:** Migration, seeding, and E2E commands can modify database contents. Where applicable, use a dedicated disposable PostgreSQL database, and independently verify both the PostgreSQL server and database identity before running potentially destructive or data-modifying commands. A database name alone does not prove that a database is disposable. Do not expose or commit database credentials.
+
+### Single-command test setup
 
 Prerequisites: Windows PowerShell, Node.js 22.12+, npm 10+, and a running PostgreSQL server. Create and independently verify in pgAdmin a dedicated disposable database named `ghl_bulk_stage_test` before running setup; do not use a development, seed, benchmark, production, or shared database. Database creation and server identity are intentionally manual because the repository cannot safely prove that a database is disposable.
 
@@ -76,15 +78,18 @@ The starter endpoint is `GET /`. Swagger UI is available at `http://localhost:30
 
 The API and worker run as separate processes and share the same PostgreSQL database and durable job queue. Start the API with `npm run start:dev`; in a second terminal, start the worker with `npm run start:worker:dev`. After building, run the worker with `npm run start:worker`. The worker creates a NestJS application context without an HTTP listener.
 
-Each worker process handles one claimed job at a time and yields after at most five completed batch or recorded retry attempts when work remains. Empty polls while due rows are locked do not consume the quantum. The yield transaction checks the current lease owner, generation, and expiry; it then returns due work to `queued` and releases the lease. The next claim increments the lease generation, so the yielding worker cannot continue with its old token. Eligible jobs are ordered by oldest progress time (falling back to creation time), so a recently progressed job moves behind jobs that have waited longer. This is a basic job-scheduling fairness measure, not workspace isolation or a starvation guarantee. Multiple worker processes may run concurrently; PostgreSQL row locking and lease generations coordinate claims.
+Workers claim jobs with database-backed leases and process one job at a time in bounded batches. Each worker yields after at most five completed batch or recorded retry attempts when work remains, allowing other eligible jobs to run. Yielding does not guarantee interactive API latency, zero starvation, or workspace isolation because the worker and API share PostgreSQL resources.
 
-A claim requires at least one pending item whose item-level `nextAttemptAt` is null or due according to PostgreSQL time. Item scheduling is authoritative: the job-level `nextAttemptAt` is only a scheduling hint, so stale hints cannot make future-only work run early or hide due items. At a yield boundary, if all remaining items are scheduled in the future, the worker returns the job to `queued` at the earliest pending-item time without changing item schedules, then releases the lease. A later claim increments the lease generation and clears the hint.
+PostgreSQL row locking and lease generations coordinate multiple worker processes. Persisted item state and item-level retry scheduling support deferred work and recovery, including shutdown and lease reclaim scenarios. On SIGINT or SIGTERM, the worker stops claiming new jobs and allows an active batch to settle before closing its database connection. An unfinished lease is left for normal expiry and reclaim; the worker does not forcibly release it.
 
-If a batch reports no due items but the deferral check finds due items still present, the worker waits with bounded polling jitter and renews the lease only when needed before checking again. If the deferral transaction errors, its commit outcome may be ambiguous: the worker discards the token, stops that attempt, waits with bounded backoff, and returns to normal claim polling without processing or renewing with the old token. A no-pending-items result is treated as an anomaly, not as successful completion. The worker also runs a read-only diagnostic at most once per minute, logging IDs and statuses of queued/running jobs with no pending items and logging diagnostic query errors.
+Relevant configuration:
 
-Yielding improves the opportunity for other eligible jobs to run, but does not guarantee interactive API latency: worker and API processes still share PostgreSQL resources. Due items that remain locked may keep a worker polling and renewing their job lease, and zero-pending anomalies are logged but not automatically reconciled or completed. SIGINT/SIGTERM stop new claims and allow an active batch to settle before the process closes its database connection. Any unfinished lease is left for normal expiry and reclaim; the worker does not forcibly release it.
-
-`BULK_JOB_WORKER_LEASE_DURATION_MS` defaults to 120,000 milliseconds and must be at least 90,000 milliseconds for the worker. It is worker-specific; the API's existing `BULK_JOB_LEASE_DURATION_MS` setting and 30,000-millisecond default are unchanged. `BULK_JOB_POLL_INTERVAL_MS` defaults to 1,000 milliseconds and accepts values from 100 through 60,000 milliseconds. `BULK_JOB_WORKER_ID` is optional; when omitted, the worker uses its hostname and process ID. Poll waits include up to 20% jitter. Claim-error backoff doubles from the configured poll interval, caps its base delay at 30 seconds, then applies the same jitter, so its maximum actual wait is less than 36 seconds.
+- `BULK_JOB_BATCH_SIZE` defaults to `100` and accepts `1`–`500`.
+- `BULK_JOB_WORKER_LEASE_DURATION_MS` defaults to `120000` milliseconds and must be at least `90000`.
+- `BULK_JOB_POLL_INTERVAL_MS` defaults to `1000` milliseconds and accepts `100`–`60000`.
+- `BULK_JOB_WORKER_ID` is optional; when omitted, the worker uses its hostname and process ID.
+- `BULK_JOB_RETRY_BACKOFF_MS` defaults to `30000` milliseconds and accepts `1000`–`3600000`.
+- The API's `BULK_JOB_LEASE_DURATION_MS` remains separate, defaulting to `30000` milliseconds and accepting `1000`–`300000`.
 
 ## Quality checks
 
@@ -95,7 +100,7 @@ npm run format:check
 npm test
 ```
 
-**E2E database safety:** E2E tests use the effective `DATABASE_URL`; they write and delete fixtures and may create and drop test triggers. Use a separate, dedicated disposable PostgreSQL database. Never run E2E tests against the seed, benchmark, development, or any valuable database. Set `DATABASE_URL` to that test database in the same PowerShell session where you run the tests. A database name alone does not establish that the server or database is disposable; independently verify the target server and database in pgAdmin first. Do not expose or print connection strings.
+**E2E procedure-specific safety:** E2E tests use the effective `DATABASE_URL`; they write and delete fixtures and may create and drop test triggers. Use only the separately verified disposable test database, and keep it distinct from seed, benchmark, development, or valuable databases.
 
 To prepare and run E2E tests, first create or select the dedicated disposable test database and independently verify its server and database identity in pgAdmin. Then, in the PowerShell terminal used for the tests, configure the test database URL (replace placeholders locally; URL-encode special characters):
 
@@ -180,9 +185,7 @@ For the assignment dataset, use a dedicated, disposable PostgreSQL database. The
 
    Run E2E tests separately using the dedicated disposable test-database procedure above, not the seed or benchmark database configured for this section.
 
-Both `db:migrate:deploy` and `db:seed:assignment` write to the database selected by `DATABASE_URL`. Independently verify the PostgreSQL server **and** database before running either command; never run them against a production, shared, or otherwise valuable database. The seed uses bounded inserts and is not one transaction, so an interruption can leave partial data. It does not delete or update existing records.
-
-The `db:check` command executes a read-only connectivity probe. Database, migration, and Studio commands require a configured `DATABASE_URL`. Review schema changes before applying any migrations.
+The seed uses bounded inserts and is not one transaction, so an interruption can leave partial data. It does not delete or update existing records. The `db:check` command executes a read-only connectivity probe. Database, migration, and Studio commands require a configured `DATABASE_URL`.
 
 ### Assignment dataset seed
 
@@ -196,11 +199,9 @@ The generated dataset plan is covered by `scripts/assignment-seed-data.spec.ts`;
 npm test -- --runInBand scripts/assignment-seed-data.spec.ts
 ```
 
-The seed command writes to PostgreSQL. Do not run it against a production, shared, or otherwise valuable database.
-
 ## Benchmark harness
 
-The reproducible bulk and crash/recovery benchmark commands are documented in [docs/BENCHMARKS.md](./docs/BENCHMARKS.md). The latest recorded bulk and crash/recovery measurements remain documented there; future baseline comparisons are follow-up work, not reported measurements. The harness uses the existing opportunity-list and bulk-job APIs and requires a dedicated disposable benchmark database. Crash-recovery requires a single worker, remains operator-attested, and cannot independently prove which process caused progress. Bulk scenarios require exactly 50,000 matched items.
+The reproducible bulk and crash/recovery benchmark commands are documented in [BENCHMARKS.md](./BENCHMARKS.md). The latest recorded bulk and crash/recovery measurements remain documented there; future baseline comparisons are follow-up work, not reported measurements. The harness uses the existing opportunity-list and bulk-job APIs and requires a dedicated disposable benchmark database. The `bulk` and `crash-start` scenarios require `--confirm-benchmark` because they submit real jobs that can modify opportunities. Crash-recovery requires a single worker, remains operator-attested, and cannot independently prove which process caused progress. Bulk scenarios require exactly 50,000 matched items.
 
 ## Opportunity API
 
@@ -304,7 +305,7 @@ Content-Type: application/json
 
 The filter and each member are optional. Supplied predicates combine with AND. Monetary bounds are inclusive decimal strings (no exponent notation); `createdAt.from` is inclusive and `createdAt.to` is exclusive. Decimal bounds are canonicalized to four fractional digits; ISO-8601 timestamps (up to nanosecond input precision) are normalized to UTC at PostgreSQL's microsecond precision; UUIDs are lowercased; omitted filter members normalize to `null` in the canonical request. The SHA-256 canonical request includes API version, workspace, target stage, and normalized filters.
 
-The service counts and snapshots matching opportunity IDs, current stages, and stage versions in one PostgreSQL `REPEATABLE READ` transaction using set-based `INSERT ... SELECT`. Transaction acquisition waits at most 10 seconds, and a transaction is bounded to 60 seconds; the job is not visible until the complete snapshot commits. The maximum is 50,000 matching opportunities; larger requests return `422 validation_failed` without creating a job. Opportunities already at the target stage are included. Zero matches produce a completed job with zero counts and no items. No worker runs automatically in this milestone.
+The service counts and snapshots matching opportunity IDs, current stages, and stage versions in one PostgreSQL `REPEATABLE READ` transaction using set-based `INSERT ... SELECT`. Transaction acquisition waits at most 10 seconds, and a transaction is bounded to 60 seconds; the job is not visible until the complete snapshot commits. The maximum is 50,000 matching opportunities; larger requests return `422 validation_failed` without creating a job. Opportunities already at the target stage are included. Zero matches produce a completed job with zero counts and no items. The API does not start a worker automatically. Start the separately implemented worker process to execute submitted jobs.
 
 The first accepted request returns `202`; a repeated workspace/key with the same canonical request returns `200` and the existing job. Reusing the key for a different request returns `409 idempotency_key_reused`. A workspace-scoped unique constraint handles concurrent requests; the losing request compares the stored canonical request after the conflict.
 

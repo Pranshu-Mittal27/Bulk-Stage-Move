@@ -146,14 +146,54 @@ describe('benchmark core', () => {
     expect(isTerminalJobStatus('running')).toBe(false);
   });
 
+  it('accepts baseline and crash-resume without confirmation', () => {
+    expect(
+      parseBenchmarkArguments(['baseline'], {}).config.confirmBenchmark,
+    ).toBe(false);
+    expect(
+      parseBenchmarkArguments(['crash-resume'], {}).config.confirmBenchmark,
+    ).toBe(false);
+  });
+
+  it('requires confirmation for mutating scenarios', () => {
+    expect(() => parseBenchmarkArguments(['bulk'], {})).toThrow(
+      'can modify 50,000 opportunities',
+    );
+    expect(() => parseBenchmarkArguments(['crash-start'], {})).toThrow(
+      'can modify 50,000 opportunities',
+    );
+    expect(() =>
+      parseBenchmarkArguments(['bulk', '--confirm-benchmark'], {}),
+    ).not.toThrow();
+    expect(() =>
+      parseBenchmarkArguments(['crash-start', '--confirm-benchmark'], {}),
+    ).not.toThrow();
+  });
+
+  it('accepts confirmation alongside existing CLI options in any order', () => {
+    const before = parseBenchmarkArguments(
+      ['bulk', '--confirm-benchmark', '--request-rate', '2'],
+      {},
+    );
+    const after = parseBenchmarkArguments(
+      ['bulk', '--request-rate', '2', '--confirm-benchmark'],
+      {},
+    );
+    expect(before.config.confirmBenchmark).toBe(true);
+    expect(after.config.confirmBenchmark).toBe(true);
+  });
+
   it('accepts defaults but rejects non-assignment counts and unsafe URLs', () => {
-    const parsed = parseBenchmarkArguments(['bulk'], {});
+    const parsed = parseBenchmarkArguments(['bulk', '--confirm-benchmark'], {});
     expect(parsed.config.targetCount).toBe(50_000);
     expect(parsed.config.largeWorkspaceId).toBe(
       '10000000-0000-4000-8000-000000000001',
     );
     expect(() =>
-      parseBenchmarkArguments(['bulk', '--target-count', '49999'], {}),
+      parseBenchmarkArguments(
+        ['bulk', '--confirm-benchmark', '--target-count', '49999'],
+        {},
+      ),
     ).toThrow('exactly 50000');
     expect(() =>
       parseBenchmarkArguments(
@@ -170,10 +210,26 @@ describe('benchmark core', () => {
     const stage = '20000000-0000-4000-8000-000000000065';
     expect(() =>
       parseBenchmarkArguments(
-        ['bulk', '--source-stage-id', stage, '--target-stage-id', stage],
+        [
+          'bulk',
+          '--confirm-benchmark',
+          '--source-stage-id',
+          stage,
+          '--target-stage-id',
+          stage,
+        ],
         {},
       ),
     ).toThrow('must be different');
+  });
+
+  it('rejects unknown flags even in argument lists', () => {
+    expect(() =>
+      parseBenchmarkArguments(
+        ['baseline', '--unknown-benchmark-option', '1'],
+        {},
+      ),
+    ).toThrow('Unknown option --unknown-benchmark-option');
   });
 
   it('selects exactly 50,000 seeded opportunities with the benchmark filter', () => {

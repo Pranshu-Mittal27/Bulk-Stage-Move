@@ -27,7 +27,7 @@ information, not fields collected by the benchmark harness.
 
 ### Bulk processing
 
-The [bulk result](../benchmarks/bulk.json) completed successfully:
+The [bulk result](./benchmarks/bulk.json) completed successfully:
 
 | Measure                                            |                   Result |
 | -------------------------------------------------- | -----------------------: |
@@ -55,12 +55,21 @@ time was 252.265 seconds.
 
 ### Crash recovery
 
-The [crash-start result](../benchmarks/crash-start-2026-11-02T20-31-00.014Z.json)
+The [crash-start result](./benchmarks/crash-start-2026-11-02T20-31-00.014Z.json)
 records 6,600 processed/moved and 43,400 pending at operator-confirmed worker
-stop. The [crash-resume result](../benchmarks/crash-recovery.json) records
+stop. The [crash-resume result](./benchmarks/crash-recovery.json) records
 status `completed`: 50,000 matched, processed, and moved; zero skipped, failed,
 or pending. The harness verifies API-visible job status and counter invariants;
 it does not read back the final stage of every opportunity.
+
+Separately, a post-run direct SQL verification was also performed. It verified
+50,000 total opportunities in the job, 50,000 moved to the target stage,
+50,000 opportunities at the target stage and zero not at the target stage, zero
+missing opportunities, 50,000 transition records, 50,000 distinct opportunities
+represented in those transitions, and zero transitions to an incorrect
+destination. This was a separate database-level verification, not something the
+benchmark harness performs automatically. It does not prove the absence of
+every retry or reprocessing event during execution.
 
 Progress was 6,600 processed at worker stop and 8,000 at the fresh
 restart-confirmation baseline, followed by observed persisted progress 1,124 ms
@@ -93,6 +102,8 @@ seeded large workspace, source stage 1, target stage 2, and inclusive value
 range `101.0000`–`25100.0000` by default. The harness requires exactly 50,000
 matched targets for these scenarios. Output paths are overwritten if they
 already exist; choose unused paths when preserving the recorded artifacts.
+The mutating `bulk` and `crash-start` scenarios require the explicit
+`--confirm-benchmark` flag. `baseline` and `crash-resume` do not require it.
 The source-stage ID can be overridden by configuration, but the resolved
 source-stage ID is not recorded in the result artifact; the artifact alone
 therefore cannot establish the exact source-stage filter used for that run.
@@ -100,14 +111,14 @@ therefore cannot establish the exact source-stage filter used for that run.
 Run the standard bulk scenario with one worker already running:
 
 ```powershell
-npm run benchmark:bulk -- bulk --request-rate 2 --concurrency 1 --timeout-seconds 3600 --output benchmarks/bulk.json
+npm run benchmark:bulk -- bulk --confirm-benchmark --request-rate 2 --concurrency 1 --timeout-seconds 3600 --output benchmarks/bulk.json
 ```
 
 For crash recovery, use a fresh disposable seeded dataset. Start the API and
 worker, then run:
 
 ```powershell
-npm run benchmark:bulk -- crash-start --checkpoint benchmarks/crash-recovery-checkpoint.json
+npm run benchmark:bulk -- crash-start --confirm-benchmark --checkpoint benchmarks/crash-recovery-checkpoint.json
 ```
 
 At the harness prompt, verify the worker process and stop only its verified PID
@@ -145,6 +156,7 @@ independently verify which OS process caused the observed progress.
   not production validation.
 - The probes share one client process, use a low fixed rate, and have no warm-up;
   client scheduling, local networking, and connection reuse affect results.
-- Crash recovery is operator-attested. Final correctness checks use
-  API-visible status and counters rather than inspecting every opportunity's
-  final stage.
+- Crash recovery is operator-attested. The harness verifies API-visible status
+  and counters but does not inspect every opportunity's final stage. A separate
+  database-level final-state verification was performed after the run; it does
+  not establish that no retry or reprocessing event occurred during execution.

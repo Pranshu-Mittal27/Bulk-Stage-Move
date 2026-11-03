@@ -8,6 +8,7 @@ export type BenchmarkScenario =
 
 export interface BenchmarkConfig {
   scenario: BenchmarkScenario;
+  confirmBenchmark: boolean;
   baseUrl: string;
   largeWorkspaceId: string;
   largeStageId: string;
@@ -65,6 +66,7 @@ export interface LatencySummary {
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const allowedOptions = new Set([
+  'confirm-benchmark',
   'base-url',
   'large-workspace-id',
   'large-stage-id',
@@ -158,8 +160,18 @@ export function parseBenchmarkArguments(
   }
 
   const values = new Map<string, string>();
-  for (let index = 0; index < optionArgs.length; index += 2) {
+  let confirmBenchmark = false;
+  for (let index = 0; index < optionArgs.length; index += 1) {
     const option = optionArgs[index];
+    if (option === '--confirm-benchmark') {
+      if (confirmBenchmark) {
+        throw new Error(
+          'Option --confirm-benchmark was provided more than once.',
+        );
+      }
+      confirmBenchmark = true;
+      continue;
+    }
     const value = optionArgs[index + 1];
     if (!option?.startsWith('--') || option.length < 3 || !value) {
       throw new Error('Options must be provided as --name value pairs.');
@@ -172,9 +184,11 @@ export function parseBenchmarkArguments(
       throw new Error(`Option --${name} was provided more than once.`);
     }
     values.set(name, value);
+    index += 1;
   }
 
   const config = defaultConfig(scenarioValue as BenchmarkScenario, environment);
+  config.confirmBenchmark = confirmBenchmark;
   const read = (name: string, envName: string, fallback: string): string =>
     values.get(name) ?? environment[envName] ?? fallback;
 
@@ -276,6 +290,11 @@ export function parseBenchmarkArguments(
     config.checkpointPath;
 
   if (config.scenario === 'bulk' || config.scenario === 'crash-start') {
+    if (!config.confirmBenchmark) {
+      throw new Error(
+        `The ${config.scenario} scenario submits a real bulk job and can modify 50,000 opportunities. Rerun with --confirm-benchmark to confirm benchmark execution.`,
+      );
+    }
     if (config.sourceStageId === config.targetStageId) {
       throw new Error('The source stage and target stage must be different.');
     }
@@ -290,6 +309,7 @@ function defaultConfig(
 ): BenchmarkConfig {
   return {
     scenario,
+    confirmBenchmark: false,
     baseUrl: environment.BENCHMARK_BASE_URL ?? 'http://127.0.0.1:3000',
     largeWorkspaceId:
       environment.BENCHMARK_LARGE_WORKSPACE_ID ?? seededWorkspaceId(1),
