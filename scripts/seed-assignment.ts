@@ -5,6 +5,7 @@ import {
   ASSIGNMENT_SEED_BATCH_SIZE,
   ASSIGNMENT_SEED_DATE_END,
   ASSIGNMENT_SEED_DATE_START,
+  ASSIGNMENT_SMALL_SEED_WORKSPACES,
   ASSIGNMENT_SEED_WORKSPACES,
   opportunityForWorkspace,
   stagesForWorkspace,
@@ -28,9 +29,12 @@ function getDatabaseConnectionString(confirmedDatabaseName: string): string {
 }
 
 async function seedAssignment(): Promise<void> {
-  const confirmedDatabaseName = parseConfirmedDatabaseName(
-    process.argv.slice(2),
-  );
+  const args = process.argv.slice(2);
+  const smallMode = args.includes('--small');
+  const confirmationArgs = smallMode
+    ? args.filter((arg) => arg !== '--small')
+    : args;
+  const confirmedDatabaseName = parseConfirmedDatabaseName(confirmationArgs);
   const connectionString = getDatabaseConnectionString(confirmedDatabaseName);
   const prisma = new PrismaClient({
     adapter: new PrismaPg({ connectionString }),
@@ -44,7 +48,10 @@ async function seedAssignment(): Promise<void> {
       databaseRows[0]?.databaseName,
       confirmedDatabaseName,
       async () => {
-        for (const workspace of ASSIGNMENT_SEED_WORKSPACES) {
+        const workspaces = smallMode
+          ? ASSIGNMENT_SMALL_SEED_WORKSPACES
+          : ASSIGNMENT_SEED_WORKSPACES;
+        for (const workspace of workspaces) {
           const expectedWorkspaceId = workspaceId(workspace.ordinal);
           const existingWorkspace = await prisma.workspace.findUnique({
             where: { id: expectedWorkspaceId },

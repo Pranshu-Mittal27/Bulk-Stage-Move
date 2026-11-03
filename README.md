@@ -10,6 +10,18 @@ An ESM-first NestJS and PostgreSQL service with workspace-scoped opportunity API
 
 ## Setup
 
+### One-command disposable test setup
+
+Prerequisites: Windows PowerShell, Node.js 22.12+, npm 10+, and a running PostgreSQL server. Create and independently verify in pgAdmin a dedicated disposable database named `ghl_bulk_stage_test` before running setup; do not use a development, seed, benchmark, production, or shared database. Database creation and server identity are intentionally manual because the repository cannot safely prove that a database is disposable.
+
+From an already created and verified disposable database, run:
+
+```powershell
+npm run setup:test -- -DatabaseUrl 'postgresql://<URL-encoded-user>:<URL-encoded-password>@<verified-server>:<port>/ghl_bulk_stage_test'
+```
+
+The command installs dependencies, generates Prisma Client, applies migrations, seeds a 120-opportunity test workspace, and runs the unit test suite. It does not create or drop the database, reset existing data, run E2E tests, or run benchmarks. The seed and migration steps reject a mismatched database URL or connected database name. Independently verify the server and database identity in pgAdmin before every setup run; `ghl_bulk_stage_test` is a name guard, not proof of disposability.
+
 1. Install dependencies:
 
    ```powershell
@@ -188,7 +200,7 @@ The seed command writes to PostgreSQL. Do not run it against a production, share
 
 ## Benchmark harness
 
-The reproducible baseline, during-bulk, and manual crash/recovery benchmark commands are documented in [docs/BENCHMARKS.md](./docs/BENCHMARKS.md). Actual local baseline, 50,000-item bulk, and operator-attested crash/recovery measurements are documented there. The harness uses the existing opportunity-list and bulk-job APIs; it does not connect to PostgreSQL or manage processes. Match request rate and concurrency between baseline and during-bulk runs, but their actual measurement durations differ and are reported separately. There is no warm-up period, so connection establishment/reuse may affect latency percentiles. Crash-recovery requires a single worker, remains operator-attested, and cannot independently prove which process caused progress. Bulk scenarios require exactly 50,000 matched items.
+The reproducible bulk and crash/recovery benchmark commands are documented in [docs/BENCHMARKS.md](./docs/BENCHMARKS.md). The latest recorded bulk and crash/recovery measurements remain documented there; future baseline comparisons are follow-up work, not reported measurements. The harness uses the existing opportunity-list and bulk-job APIs and requires a dedicated disposable benchmark database. Crash-recovery requires a single worker, remains operator-attested, and cannot independently prove which process caused progress. Bulk scenarios require exactly 50,000 matched items.
 
 ## Opportunity API
 

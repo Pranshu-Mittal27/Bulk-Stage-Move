@@ -2,7 +2,7 @@
 
 ## Scope and evidence
 
-This document describes the implementation in this repository, not a claim of production readiness. I did not find the original assignment PDF in the repository; this design is based on the requirements recorded in `README.md` and the code, not a quotation or verification of that PDF.
+This document describes the implementation in this repository against the Bulk Stage Move take-home requirements. It distinguishes implemented behavior and test evidence from measured results, assumptions, and unverified production-scale hypotheses.
 
 The service uses PostgreSQL as both the system of record and the durable job queue. The API and worker are separate processes from the same codebase. Workspace IDs scope records and requests, but the workspace header is not authentication.
 
@@ -41,7 +41,9 @@ Targets are determined at submission commit, not by re-running the filter during
 
 Manual stage changes require `expectedStageVersion`. The API locks the workspace-scoped opportunity row, checks the expected version, and conditionally updates its stage while incrementing the version. A successful move and its `manual` transition are committed together. A stale version returns `409 stage_version_conflict`; requesting the existing stage with the current version is a no-op.
 
-Bulk processing uses the same stage-version guard against the submission snapshot and records a `bulk` transition only for a successful move. Both paths lock the opportunity row and update against the expected stage/version. If a manual change wins first and moves the opportunity to the bulk job's target stage, the bulk item is skipped with reason `already_at_destination`; otherwise, if its stage or version no longer matches the snapshot, it is skipped with reason `stale_snapshot`. If bulk wins first, a manual request based on the old version conflicts. A later manual request using the new version can proceed. This is optimistic concurrency with row locking, not a promise that manual work always wins regardless of ordering. The dedicated manual-vs-bulk concurrency E2E test in `test/bulk-job-processing.e2e-spec.ts` uses PostgreSQL lock-state observation to confirm the manual request blocks behind bulk processing, then verifies the bulk move succeeds and the stale manual request receives `409 stage_version_conflict`, with the expected final opportunity, item, counters, and transition.
+Bulk processing uses the same stage-version guard against the submission snapshot and records a `bulk` transition only for a successful move. Both paths lock the opportunity row and update against the expected stage/version. If a manual change wins first and moves the opportunity to the bulk job's target stage, the bulk item is skipped with reason `already_at_destination`; otherwise, if its stage or version no longer matches the snapshot, it is skipped with reason `stale_snapshot`. If bulk wins first, a manual request based on the old version conflicts. A later manual request using the new version can proceed. This is optimistic concurrency with row locking, not a promise that manual work always wins regardless of ordering. The dedicated manual-vs-bulk concurrency E2E test deterministically exercises the bulk-first ordering. It uses PostgreSQL advisory-lock and row-lock observation to establish that bulk processing holds the opportunity lock while a manual API request waits. After bulk commits, the manual request receives `409 stage_version_conflict`. The test verifies the final opportunity, item outcome, job counters, and transition history.
+
+A separate stale-snapshot test verifies that a pre-existing stage/version change is not overwritten by bulk processing. The reverse ordering has not been exercised as a synchronized API-vs-worker race.
 
 ## Isolation, scheduling, and starvation
 

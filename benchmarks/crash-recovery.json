@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-01T20:11:54.993Z",
+  "generatedAt": "2026-11-02T20:33:39.389Z",
   "scenario": "crash-resume",
   "baseUrl": "http://127.0.0.1:3000",
   "environment": {
@@ -11,33 +11,33 @@
     "logicalCpuCount": 12
   },
   "success": true,
-  "submittedAt": "2026-11-01T20:08:19.105Z",
-  "restartConfirmationAt": "2026-11-01T20:12:46.742Z",
+  "submittedAt": "2026-11-02T20:31:00.019Z",
+  "restartConfirmationAt": "2026-11-02T20:34:19.934Z",
   "restartConfirmationProgress": {
     "status": "running",
     "counters": {
       "matchedCount": 50000,
-      "processedCount": 18100,
-      "movedCount": 18100,
+      "processedCount": 8000,
+      "movedCount": 8000,
       "skippedCount": 0,
       "failedCount": 0,
-      "pendingCount": 31900
+      "pendingCount": 42000
     }
   },
-  "completionObservedAt": "2026-11-01T20:16:45.495Z",
-  "restartConfirmationToObservedProgressMs": 1173.311999999998,
-  "totalCompletionWallClockMs": 506390,
-  "submissionLatencyMs": 2250.5762,
+  "completionObservedAt": "2026-11-02T20:36:32.956Z",
+  "restartConfirmationToObservedProgressMs": 1124.4213000000018,
+  "totalCompletionWallClockMs": 332937,
+  "submissionLatencyMs": 1724.8049,
   "progressAtStop": {
     "matchedCount": 50000,
-    "processedCount": 15300,
-    "movedCount": 15300,
+    "processedCount": 6600,
+    "movedCount": 6600,
     "skippedCount": 0,
     "failedCount": 0,
-    "pendingCount": 34700
+    "pendingCount": 43400
   },
   "job": {
-    "id": "5999b614-4538-4027-9a14-adbb7143b537",
+    "id": "0d2d47f4-9585-4521-91be-d487a01c3201",
     "status": "completed",
     "targetStageId": "20000000-0000-4000-8000-000000000066",
     "counters": {
@@ -48,13 +48,13 @@
       "failedCount": 0,
       "pendingCount": 0
     },
-    "workerStartedAt": "2026-11-02T01:38:22.079Z",
-    "workerCompletedAt": "2026-11-02T01:46:45.269Z",
-    "persistedWallClockElapsedMs": 503190,
+    "workerStartedAt": "2026-11-03T02:01:02.363Z",
+    "workerCompletedAt": "2026-11-03T02:06:32.362Z",
+    "persistedWallClockElapsedMs": 329999,
     "throughput": {
-      "persistedWallClockElapsedMs": 503190,
-      "processedItemsPerPersistedWallClockSecond": 99.36604463522725,
-      "movedOpportunitiesPerPersistedWallClockSecond": 99.36604463522725
+      "persistedWallClockElapsedMs": 329999,
+      "processedItemsPerPersistedWallClockSecond": 151.5156106533656,
+      "movedOpportunitiesPerPersistedWallClockSecond": 151.5156106533656
     }
   },
   "failure": null,

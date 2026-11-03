@@ -3,6 +3,7 @@ import {
   ASSIGNMENT_SEED_DATE_END,
   ASSIGNMENT_SEED_DATE_START,
   ASSIGNMENT_SEED_STAGES,
+  ASSIGNMENT_SMALL_SEED_WORKSPACES,
   ASSIGNMENT_SEED_WORKSPACES,
   opportunityForWorkspace,
   stageCountsForWorkspace,
@@ -11,6 +12,15 @@ import {
 } from './assignment-seed-data.js';
 
 describe('assignment seed plan', () => {
+  it('defines an independent, genuinely small setup seed mode', () => {
+    expect(ASSIGNMENT_SMALL_SEED_WORKSPACES).toEqual([
+      {
+        ordinal: 7,
+        name: 'Take-home setup: small test workspace',
+        opportunityCount: 120,
+      },
+    ]);
+  });
   it('defines one large and five small workspaces with twelve stages each', () => {
     expect(
       ASSIGNMENT_SEED_WORKSPACES.map((workspace) => workspace.opportunityCount),

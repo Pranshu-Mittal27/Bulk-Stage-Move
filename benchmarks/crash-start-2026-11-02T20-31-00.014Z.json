@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-01T20:08:19.104Z",
+  "generatedAt": "2026-11-02T20:31:00.015Z",
   "scenario": "crash-start",
   "baseUrl": "http://127.0.0.1:3000",
   "environment": {
@@ -11,28 +11,29 @@
     "logicalCpuCount": 12
   },
   "success": true,
-  "startedAt": "2026-11-01T20:08:19.105Z",
-  "completedAt": "2026-11-01T20:10:41.360Z",
-  "elapsedMs": 142255.2998,
-  "submissionLatencyMs": 2250.5762,
+  "startedAt": "2026-11-02T20:31:00.018Z",
+  "completedAt": "2026-11-02T20:32:19.547Z",
+  "elapsedMs": 79529.72170000001,
+  "submissionLatencyMs": 1724.8049,
   "workspaceId": "10000000-0000-4000-8000-000000000001",
   "job": {
-    "id": "5999b614-4538-4027-9a14-adbb7143b537",
+    "id": "0d2d47f4-9585-4521-91be-d487a01c3201",
     "status": "running",
     "targetStageId": "20000000-0000-4000-8000-000000000066",
     "counters": {
       "matchedCount": 50000,
-      "processedCount": 15300,
-      "movedCount": 15300,
+      "processedCount": 6600,
+      "movedCount": 6600,
       "skippedCount": 0,
       "failedCount": 0,
-      "pendingCount": 34700
+      "pendingCount": 43400
     },
-    "workerStartedAt": "2026-11-02T01:38:22.079Z",
+    "workerStartedAt": "2026-11-03T02:01:02.363Z",
     "workerCompletedAt": null,
     "persistedWallClockElapsedMs": null,
     "throughput": null
   },
+  "checkpointPath": "benchmarks/crash-recovery-checkpoint.json",
   "progressImmediatelyBeforeStop": {
     "matchedCount": 50000,
     "processedCount": 100,
@@ -43,13 +44,13 @@
   },
   "progressAtStop": {
     "matchedCount": 50000,
-    "processedCount": 15300,
-    "movedCount": 15300,
+    "processedCount": 6600,
+    "movedCount": 6600,
     "skippedCount": 0,
     "failedCount": 0,
-    "pendingCount": 34700
+    "pendingCount": 43400
   },
-  "progressFirstObservedAt": "2026-11-01T20:08:24.508Z",
-  "workerStopConfirmedAt": "2026-11-01T20:10:41.248Z",
+  "progressFirstObservedAt": "2026-11-02T20:31:03.815Z",
+  "workerStopConfirmedAt": "2026-11-02T20:32:19.490Z",
   "operatorAction": "Worker stop was operator-attested. No other worker may run during the experiment. Restart the worker manually, then run crash-resume with this checkpoint."
 }

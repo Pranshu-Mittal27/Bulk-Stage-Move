@@ -1,0 +1,2 @@
+# Local crash-recovery checkpoints are inputs to a specific disposable database run.
+*-checkpoint.json

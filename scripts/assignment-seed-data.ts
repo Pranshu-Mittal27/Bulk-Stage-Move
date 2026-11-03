@@ -61,6 +61,15 @@ export const ASSIGNMENT_SEED_WORKSPACES: readonly AssignmentWorkspaceSeed[] = [
   },
 ];
 
+export const ASSIGNMENT_SMALL_SEED_WORKSPACES: readonly AssignmentWorkspaceSeed[] =
+  [
+    {
+      ordinal: 7,
+      name: 'Take-home setup: small test workspace',
+      opportunityCount: 120,
+    },
+  ];
+
 export interface AssignmentSeedStage {
   id: string;
   name: string;
