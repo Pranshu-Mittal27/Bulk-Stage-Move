@@ -27,7 +27,7 @@ This document records deliberate scope choices and verified limitations in the t
 
 ### Due work can cause polling when its item rows remain locked
 
-- **Current behavior:** Batch selection skips locked item rows. If no item can be selected but due pending items still exist, the worker waits with bounded jitter, checks again, and renews the lease only when its renewal interval is reached. The worker README documents this behavior.
+- **Current behavior:** Batch selection skips locked item rows. If no item can be selected but due pending items still exist, the worker waits with bounded jitter, checks again, and renews the lease only when its renewal interval is reached. The Worker section of the README describes this behavior.
 - **Impact:** A long-held item lock can keep a worker occupied polling and renewing instead of making progress on another job.
 - **Why deferred:** The existing behavior avoids a tight retry loop and preserves job ownership while the due work is temporarily unavailable; changing job scheduling around row locks needs concurrency evidence.
 - **Possible next-week improvement:** Use a PostgreSQL lock-contention test to measure the wait pattern and lease behavior, then decide whether a bounded wait limit or a diagnostic is warranted.
@@ -64,11 +64,11 @@ This document records deliberate scope choices and verified limitations in the t
 
 The implementation retains workspace isolation, idempotent submission, snapshot semantics and the item limit, atomic stage changes with transition history, optimistic version checks, durable per-item outcomes, bounded batch processing, lease ownership and expiry validation, generation fencing, retry eligibility, deferred scheduling, and progress-counter invariants. These correctness mechanisms should not be removed merely to reduce code size.
 
-## Suggested next-week priorities
+## Potential follow-up priorities
 
 1. **Strengthen performance evidence.** Repeat the existing local scenarios and define representative workloads/environment for submission, persisted end-to-end throughput, and interactive latency; capture query plans and contention before proposing optimizations.
 2. **Assess queue fairness with evidence.** Measure queue wait time by workspace and job under mixed load, then decide whether the current oldest-eligible ordering is insufficient.
 3. **Investigate lock-wait behavior.** Exercise due items held by competing transactions and measure polling, lease renewals, and time to resume.
 4. **Clarify operational handling of anomalies and wait reasons.** Review observed anomaly frequency and client needs before adding reconciliation or exposing new API state.
 
-These are investigation priorities, not commitments to add production infrastructure or features. The original assignment prompt was not available in the repository during this review, so this document makes no claims about unverified rubric requirements.
+These are investigation priorities, not commitments to add production infrastructure or features.

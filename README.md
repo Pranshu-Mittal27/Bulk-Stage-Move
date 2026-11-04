@@ -1,6 +1,6 @@
 # bulk-stage-service
 
-An ESM-first NestJS and PostgreSQL service with workspace-scoped opportunity APIs, durable bulk-job submission, lease management, bounded batch processing, and a separately runnable worker execution loop with deferred-job scheduling. Authentication and UI are not included.
+An ESM-first NestJS and PostgreSQL service for workspace-scoped opportunity APIs and durable bulk-stage-move jobs. It includes idempotent submission, lease-based job ownership, bounded batch processing, retries, crash recovery, deferred scheduling, and a separately runnable worker. Authentication and UI are not included.
 
 ## Requirements
 

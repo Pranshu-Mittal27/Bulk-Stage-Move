@@ -4,10 +4,9 @@
 
 This document reports the primary bulk and crash-recovery experiments.
 Interactive probes use the read-only opportunity-list endpoint. These are
-individual local runs, not statistically controlled repeated experiments.
-The run numbers below identify the experiments retained in the final submitted
-evidence; they do not claim these were necessarily the first experiments ever
-performed.
+individual local runs, not statistically controlled repeated experiments. The
+run numbers below identify the primary bulk and crash-recovery evidence
+retained for the final submission.
 
 | Environment        | Value                                                                                                 |
 | ------------------ | ----------------------------------------------------------------------------------------------------- |

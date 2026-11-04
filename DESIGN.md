@@ -57,7 +57,7 @@ A claim marks a job `running` and stores a lease owner, expiry, heartbeat, and i
 
 Recognized transient database conflicts (including serialization/deadlock conflicts) roll back the batch and persist one failed attempt, an error code, and a retry time for the active pending item. `BULK_JOB_RETRY_BACKOFF_MS` defaults to 30 seconds and is bounded from 1 second to 1 hour; item schedules determine eligibility, while the job schedule is a hint. Future-only pending work is deferred and re-queued for its earliest due time. Each item has a fixed maximum of five recorded failed attempts. On the fifth conflict, the item and job counters are updated atomically: the item becomes `failed`, `failedCount` and `processedCount` increment once, and the final item makes the job `completed_with_errors`. There is no additional retry/dead-letter subsystem. Unexpected batch errors remain on the worker error path; they do not create failed item outcomes or change item/job counters.
 
-The repository has unit coverage for worker-loop behavior and configuration bounds, and database-backed end-to-end cases for submission/idempotency/snapshots, atomic batches, stale targets, retries, lease expiry/reclaim, fencing, and concurrent claims. A recorded test run passed 153 unit tests and 88 E2E tests across 4 suites. These counts are recorded results, not a claim that the tests were freshly rerun as part of this documentation edit. A local manual crash/recovery run is recorded in `BENCHMARKS.md`; it is operator-attested and cannot independently prove which OS process caused subsequent progress.
+The repository has unit coverage for worker-loop behavior and configuration bounds, and database-backed end-to-end cases for submission/idempotency/snapshots, atomic batches, stale targets, retries, lease expiry/reclaim, fencing, and concurrent claims. A recorded test run passed 153 unit tests and 88 E2E tests across 4 suites. A local manual crash/recovery run is recorded in `BENCHMARKS.md`; it is operator-attested and cannot independently prove which OS process caused subsequent progress.
 
 ## Risks to measure at 10x
 
@@ -65,7 +65,7 @@ At substantially higher data or job volume, plausible pressure points include th
 
 These are hypotheses grounded in the implementation, not proven bottlenecks. The per-job matched-item limit remains 50,000; “10x” does not change that limit. A single local run measured 50,000-item persisted end-to-end throughput and interactive latency during bulk work, as documented in `BENCHMARKS.md`. It did not measure isolated worker processing rate, 10x capacity, query plans, connection saturation, or production performance.
 
-## Ranked next-week improvements
+## Potential follow-up improvements
 
 1. **Strengthen the performance evidence.** Repeat the documented baseline, 50,000-item, interactive, and manual recovery scenarios and test representative higher or mixed loads on verified disposable environments. Preserve the JSON and record client/server hardware, PostgreSQL version/configuration, worker count, and actual durations before making capacity claims.
 2. **Measure isolation and queue behavior.** Use a mixed-workspace workload to record queue wait and interactive latency by workspace; test concurrent jobs and lock contention. Decide on a fairness objective from evidence before changing scheduling.
