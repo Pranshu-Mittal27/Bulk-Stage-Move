@@ -92,6 +92,19 @@ observations. Throughput is processed outcomes divided by the persisted job
 interval, and is an aggregate interval average rather than a measured
 steady-state rate.
 
+### 50k API submission latency — Docker E2E verification
+
+**50k API submission latency — Docker E2E verification: 1,185 ms.**
+
+This single Docker Compose E2E verification measurement is the time to receive
+the HTTP 202 response for submission and snapshot creation for exactly 50,000
+opportunities. It does not measure worker processing completion time, persisted
+throughput, or end-to-end job completion.
+
+It is separate from the worker benchmark results above and must not be combined
+with or compared directly to those worker throughput or completion-time
+measurements.
+
 ## Crash recovery
 
 Crash Run 1 is the primary recovery experiment retained in the final submitted
