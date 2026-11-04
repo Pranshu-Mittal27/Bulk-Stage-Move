@@ -579,16 +579,32 @@ export class BulkJobProcessingService {
           `);
           if (failedItems.length !== 1) {
             const stillValid = await transaction.$queryRaw<
-              { valid: boolean }[]
+              { validLease: boolean; itemNotPending: boolean }[]
             >(Prisma.sql`
-              SELECT "leaseExpiresAt" > clock_timestamp() AS "valid"
-              FROM "BulkJob"
-              WHERE "id" = ${token.jobId}::uuid
-                AND "status" = 'running'::"BulkJobStatus"
-                AND "leaseOwner" = ${token.leaseOwner}
-                AND "leaseGeneration" = ${token.leaseGeneration}
+              SELECT
+                EXISTS (
+                  SELECT 1
+                  FROM "BulkJob"
+                  WHERE "id" = ${token.jobId}::uuid
+                    AND "status" = 'running'::"BulkJobStatus"
+                    AND "leaseOwner" = ${token.leaseOwner}
+                    AND "leaseGeneration" = ${token.leaseGeneration}
+                    AND "leaseExpiresAt" > clock_timestamp()
+                ) AS "validLease",
+                EXISTS (
+                  SELECT 1
+                  FROM "BulkJobItem"
+                  WHERE "jobId" = ${token.jobId}::uuid
+                    AND "itemId" = ${itemId}
+                    AND "status" <> 'pending'::"BulkJobItemStatus"
+                ) AS "itemNotPending"
             `);
-            return stillValid[0]?.valid ? 'item_not_pending' : 'lease_lost';
+            if (!stillValid[0]?.validLease) {
+              return 'lease_lost';
+            }
+            return stillValid[0].itemNotPending
+              ? 'item_not_pending'
+              : 'lease_lost';
           }
 
           const pendingCount = await transaction.bulkJobItem.count({
@@ -679,14 +695,31 @@ export class BulkJobProcessingService {
           return 'recorded';
         }
 
-        const stillValid = await transaction.$queryRaw<
-          { valid: boolean }[]
+        const fallback = await transaction.$queryRaw<
+          { validLease: boolean; itemNotPending: boolean }[]
         >(Prisma.sql`
-          SELECT "leaseExpiresAt" > clock_timestamp() AS "valid"
-          FROM "BulkJob"
-          WHERE "id" = ${token.jobId}::uuid
+          SELECT
+            EXISTS (
+              SELECT 1
+              FROM "BulkJob"
+              WHERE "id" = ${token.jobId}::uuid
+                AND "status" = 'running'::"BulkJobStatus"
+                AND "leaseOwner" = ${token.leaseOwner}
+                AND "leaseGeneration" = ${token.leaseGeneration}
+                AND "leaseExpiresAt" > clock_timestamp()
+            ) AS "validLease",
+            EXISTS (
+              SELECT 1
+              FROM "BulkJobItem"
+              WHERE "jobId" = ${token.jobId}::uuid
+                AND "itemId" = ${itemId}
+                AND "status" <> 'pending'::"BulkJobItemStatus"
+            ) AS "itemNotPending"
         `);
-        return stillValid[0]?.valid ? 'item_not_pending' : 'lease_lost';
+        if (!fallback[0]?.validLease) {
+          return 'lease_lost';
+        }
+        return fallback[0].itemNotPending ? 'item_not_pending' : 'lease_lost';
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,

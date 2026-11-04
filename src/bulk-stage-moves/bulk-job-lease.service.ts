@@ -159,8 +159,10 @@ export class BulkJobLeaseService {
               job."status" = 'queued'::"BulkJobStatus"
               OR (
                 job."status" = 'running'::"BulkJobStatus"
-                AND job."leaseExpiresAt" IS NOT NULL
-                AND job."leaseExpiresAt" <= candidate_time."now"
+                AND (
+                  job."leaseExpiresAt" IS NULL
+                  OR job."leaseExpiresAt" <= candidate_time."now"
+                )
               )
             )
               AND EXISTS (
@@ -202,8 +204,10 @@ export class BulkJobLeaseService {
                   job."status" = 'queued'::"BulkJobStatus"
                   OR (
                     job."status" = 'running'::"BulkJobStatus"
-                    AND job."leaseExpiresAt" IS NOT NULL
-                    AND job."leaseExpiresAt" <= eligibility_time."now"
+                    AND (
+                      job."leaseExpiresAt" IS NULL
+                      OR job."leaseExpiresAt" <= eligibility_time."now"
+                    )
                   )
                 )
                 AND EXISTS (
@@ -244,8 +248,10 @@ export class BulkJobLeaseService {
                 job."status" = 'queued'::"BulkJobStatus"
                 OR (
                   job."status" = 'running'::"BulkJobStatus"
-                  AND job."leaseExpiresAt" IS NOT NULL
-                  AND job."leaseExpiresAt" <= claim_time."now"
+                  AND (
+                    job."leaseExpiresAt" IS NULL
+                    OR job."leaseExpiresAt" <= claim_time."now"
+                  )
                 )
               )
               AND EXISTS (

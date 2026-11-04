@@ -6,7 +6,10 @@ import { BulkJobLeaseService } from '../src/bulk-stage-moves/bulk-job-lease.serv
 import { BulkJobProcessingService } from '../src/bulk-stage-moves/bulk-job-processing.service.js';
 import { PrismaService } from '../src/database/prisma.service.js';
 import { Prisma } from '../src/generated/prisma/client.js';
-import { BulkJobStatus } from '../src/generated/prisma/enums.js';
+import {
+  BulkJobItemStatus,
+  BulkJobStatus,
+} from '../src/generated/prisma/enums.js';
 
 describe('Bulk job lease service (e2e)', () => {
   let app: INestApplication;
@@ -102,6 +105,24 @@ describe('Bulk job lease service (e2e)', () => {
         "status" = 'running'::"BulkJobStatus",
         "leaseOwner" = ${owner},
         "leaseExpiresAt" = clock_timestamp() + INTERVAL '1 hour',
+        "heartbeatAt" = clock_timestamp(),
+        "leaseGeneration" = ${generation},
+        "startedAt" = clock_timestamp()
+      WHERE "id" = ${jobId}::uuid
+    `;
+  }
+
+  async function setNullLease(
+    jobId: string,
+    owner: string,
+    generation: number,
+  ): Promise<void> {
+    await prisma.$executeRaw`
+      UPDATE "BulkJob"
+      SET
+        "status" = 'running'::"BulkJobStatus",
+        "leaseOwner" = ${owner},
+        "leaseExpiresAt" = NULL,
         "heartbeatAt" = clock_timestamp(),
         "leaseGeneration" = ${generation},
         "startedAt" = clock_timestamp()
@@ -271,6 +292,56 @@ describe('Bulk job lease service (e2e)', () => {
     });
     expect(job.leaseOwner).toBe('worker-existing');
     expect(job.leaseGeneration).toBe(4);
+  });
+
+  it('reclaims a running job with a NULL lease expiry', async () => {
+    const created = await createJob();
+    await setNullLease(created.id, 'worker-old', 6);
+
+    const result = await leases.claimNext('worker-new');
+
+    expect(result.kind).toBe('claimed');
+    if (result.kind !== 'claimed') {
+      throw new Error('Expected the NULL lease expiry job to be reclaimable.');
+    }
+    expect(result.job).toMatchObject({
+      id: created.id,
+      status: BulkJobStatus.running,
+      leaseOwner: 'worker-new',
+      leaseGeneration: 7,
+    });
+    expect(result.job.leaseExpiresAt).toBeInstanceOf(Date);
+    expect(result.job.leaseExpiresAt.getTime()).toBeGreaterThan(Date.now());
+
+    expect(
+      await leases.renew({
+        jobId: created.id,
+        leaseOwner: 'worker-new',
+        leaseGeneration: 7,
+      }),
+    ).not.toEqual({ kind: 'lease_lost' });
+    expect(
+      await leases.renew({
+        jobId: created.id,
+        leaseOwner: 'worker-old',
+        leaseGeneration: 6,
+      }),
+    ).toEqual({ kind: 'lease_lost' });
+
+    const persisted = await prisma.bulkJob.findUniqueOrThrow({
+      where: { id: created.id },
+    });
+    expect(persisted.status).toBe(BulkJobStatus.running);
+    expect(persisted.leaseOwner).toBe('worker-new');
+    expect(persisted.leaseGeneration).toBe(7);
+    expect(
+      await prisma.bulkJobItem.findFirst({
+        where: {
+          jobId: created.id,
+          status: BulkJobItemStatus.pending,
+        },
+      }),
+    ).not.toBeNull();
   });
 
   it('reclaims an expired lease with a new fencing generation', async () => {
