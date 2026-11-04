@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-11-02T20:31:00.015Z",
+  "generatedAt": "2026-11-04T07:12:39.504Z",
   "scenario": "crash-start",
-  "baseUrl": "http://127.0.0.1:3000",
+  "baseUrl": "http://127.0.0.1:3004",
   "environment": {
     "platform": "win32",
     "platformRelease": "10.0.26300",
@@ -11,29 +11,29 @@
     "logicalCpuCount": 12
   },
   "success": true,
-  "startedAt": "2026-11-02T20:31:00.018Z",
-  "completedAt": "2026-11-02T20:32:19.547Z",
-  "elapsedMs": 79529.72170000001,
-  "submissionLatencyMs": 1724.8049,
+  "startedAt": "2026-11-04T07:12:39.505Z",
+  "completedAt": "2026-11-04T07:12:57.486Z",
+  "elapsedMs": 17981.034799999998,
+  "submissionLatencyMs": 2747.6068,
   "workspaceId": "10000000-0000-4000-8000-000000000001",
   "job": {
-    "id": "0d2d47f4-9585-4521-91be-d487a01c3201",
+    "id": "9a497a57-afc4-429b-8d2b-bb437e75e0ed",
     "status": "running",
     "targetStageId": "20000000-0000-4000-8000-000000000066",
     "counters": {
       "matchedCount": 50000,
-      "processedCount": 6600,
-      "movedCount": 6600,
+      "processedCount": 900,
+      "movedCount": 900,
       "skippedCount": 0,
       "failedCount": 0,
-      "pendingCount": 43400
+      "pendingCount": 49100
     },
-    "workerStartedAt": "2026-11-03T02:01:02.363Z",
+    "workerStartedAt": "2026-11-04T12:42:42.816Z",
     "workerCompletedAt": null,
     "persistedWallClockElapsedMs": null,
     "throughput": null
   },
-  "checkpointPath": "benchmarks/crash-recovery-checkpoint.json",
+  "checkpointPath": "E:\\HighLevel\\benchmarks\\crash-second-checkpoint.json",
   "progressImmediatelyBeforeStop": {
     "matchedCount": 50000,
     "processedCount": 100,
@@ -44,13 +44,13 @@
   },
   "progressAtStop": {
     "matchedCount": 50000,
-    "processedCount": 6600,
-    "movedCount": 6600,
+    "processedCount": 900,
+    "movedCount": 900,
     "skippedCount": 0,
     "failedCount": 0,
-    "pendingCount": 43400
+    "pendingCount": 49100
   },
-  "progressFirstObservedAt": "2026-11-02T20:31:03.815Z",
-  "workerStopConfirmedAt": "2026-11-02T20:32:19.490Z",
+  "progressFirstObservedAt": "2026-11-04T07:12:44.312Z",
+  "workerStopConfirmedAt": "2026-11-04T07:12:57.378Z",
   "operatorAction": "Worker stop was operator-attested. No other worker may run during the experiment. Restart the worker manually, then run crash-resume with this checkpoint."
 }

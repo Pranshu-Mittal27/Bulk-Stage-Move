@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-11-02T20:33:39.389Z",
+  "generatedAt": "2026-11-04T07:13:09.085Z",
   "scenario": "crash-resume",
-  "baseUrl": "http://127.0.0.1:3000",
+  "baseUrl": "http://127.0.0.1:3004",
   "environment": {
     "platform": "win32",
     "platformRelease": "10.0.26300",
@@ -11,33 +11,33 @@
     "logicalCpuCount": 12
   },
   "success": true,
-  "submittedAt": "2026-11-02T20:31:00.019Z",
-  "restartConfirmationAt": "2026-11-02T20:34:19.934Z",
+  "submittedAt": "2026-11-04T07:12:39.505Z",
+  "restartConfirmationAt": "2026-11-04T07:13:43.956Z",
   "restartConfirmationProgress": {
     "status": "running",
     "counters": {
       "matchedCount": 50000,
-      "processedCount": 8000,
-      "movedCount": 8000,
+      "processedCount": 900,
+      "movedCount": 900,
       "skippedCount": 0,
       "failedCount": 0,
-      "pendingCount": 42000
+      "pendingCount": 49100
     }
   },
-  "completionObservedAt": "2026-11-02T20:36:32.956Z",
-  "restartConfirmationToObservedProgressMs": 1124.4213000000018,
-  "totalCompletionWallClockMs": 332937,
-  "submissionLatencyMs": 1724.8049,
+  "completionObservedAt": "2026-11-04T07:23:44.930Z",
+  "restartConfirmationToObservedProgressMs": 88593.94,
+  "totalCompletionWallClockMs": 665425,
+  "submissionLatencyMs": 2747.6068,
   "progressAtStop": {
     "matchedCount": 50000,
-    "processedCount": 6600,
-    "movedCount": 6600,
+    "processedCount": 900,
+    "movedCount": 900,
     "skippedCount": 0,
     "failedCount": 0,
-    "pendingCount": 43400
+    "pendingCount": 49100
   },
   "job": {
-    "id": "0d2d47f4-9585-4521-91be-d487a01c3201",
+    "id": "9a497a57-afc4-429b-8d2b-bb437e75e0ed",
     "status": "completed",
     "targetStageId": "20000000-0000-4000-8000-000000000066",
     "counters": {
@@ -48,13 +48,13 @@
       "failedCount": 0,
       "pendingCount": 0
     },
-    "workerStartedAt": "2026-11-03T02:01:02.363Z",
-    "workerCompletedAt": "2026-11-03T02:06:32.362Z",
-    "persistedWallClockElapsedMs": 329999,
+    "workerStartedAt": "2026-11-04T12:42:42.816Z",
+    "workerCompletedAt": "2026-11-04T12:53:44.354Z",
+    "persistedWallClockElapsedMs": 661538,
     "throughput": {
-      "persistedWallClockElapsedMs": 329999,
-      "processedItemsPerPersistedWallClockSecond": 151.5156106533656,
-      "movedOpportunitiesPerPersistedWallClockSecond": 151.5156106533656
+      "persistedWallClockElapsedMs": 661538,
+      "processedItemsPerPersistedWallClockSecond": 75.58144808008005,
+      "movedOpportunitiesPerPersistedWallClockSecond": 75.58144808008005
     }
   },
   "failure": null,
