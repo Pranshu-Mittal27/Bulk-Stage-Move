@@ -7,10 +7,46 @@ An ESM-first NestJS and PostgreSQL service with workspace-scoped opportunity API
 - Node.js 22.12 or newer (tested with Node.js 22.23.4)
 - npm 10 or newer
 - PostgreSQL (the local database is named `ghl_bulk_stage`)
+- Docker Desktop or Docker Engine with Docker Compose, only for the disposable Docker grading workflow below
 
 ## Setup
 
 > **Database safety:** Migration, seeding, and E2E commands can modify database contents. Where applicable, use a dedicated disposable PostgreSQL database, and independently verify both the PostgreSQL server and database identity before running potentially destructive or data-modifying commands. A database name alone does not prove that a database is disposable. Do not expose or commit database credentials.
+
+### Run everything with Docker
+
+Prerequisites: Docker Desktop on Windows or macOS, or Docker Engine with Docker Compose v2 on Linux. Docker must be running. No local PostgreSQL installation is required.
+
+From the repository root, run the complete clean grading workflow:
+
+```text
+docker compose up --build --abort-on-container-exit --exit-code-from test test
+```
+
+This command:
+
+1. Creates an isolated PostgreSQL container with the dedicated database `ghl_bulk_stage_test`.
+2. Waits for PostgreSQL to become healthy.
+3. Installs the locked npm dependencies with `npm ci`.
+4. Generates Prisma Client and applies all existing migrations.
+5. Seeds the existing small test dataset: one workspace, 12 stages, and 120 opportunities.
+6. Runs the complete unit test suite sequentially.
+7. Runs the complete database-backed E2E test suite sequentially.
+
+Use `docker compose up ...` output to inspect each stage and Jest result. A zero exit code indicates that setup and all tests passed. A migration, seed, unit-test, or E2E-test failure stops the service and causes the Compose command to return a non-zero exit code. PostgreSQL and the container filesystem are disposable: the database has no persistent volume, and no application data is written to the host database.
+
+Clean up and remove the containers with:
+
+```text
+docker compose down
+```
+
+If Docker is not running, start Docker Desktop or the Docker Engine service and retry. If Compose reports an address or port conflict, stop the conflicting container or local service and retry; this workflow does not publish the PostgreSQL port to the host. If image downloads fail, verify network/Docker Hub access and retry with Docker running. For further container logs, run:
+
+```text
+docker compose logs postgres
+docker compose logs test
+```
 
 ### Single-command test setup
 

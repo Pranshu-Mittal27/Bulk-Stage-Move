@@ -548,7 +548,8 @@ describe('Bulk stage move submission API (e2e)', () => {
     expect(insertedOpportunities).toHaveLength(50_000);
 
     const key = idempotencyKey();
-    const response = await submit({ targetStageId }, key).expect(202);
+    const response = await submit({ targetStageId }, key);
+    expect(response.status).toBe(202);
     expect(response.body).toMatchObject({
       matchedCount: 50_000,
       processedCount: 0,
@@ -690,7 +691,7 @@ describe('Bulk stage move submission API (e2e)', () => {
                   transactionProperty,
                   transactionReceiver,
                 ) {
-                  if (transactionProperty === '$executeRaw') {
+                  if (transactionProperty === '$queryRaw') {
                     return () => {
                       throw new Error('Injected snapshot failure.');
                     };

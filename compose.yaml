@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:16.11-bookworm
+    environment:
+      POSTGRES_DB: ghl_bulk_stage_test
+      POSTGRES_USER: grader
+      POSTGRES_PASSWORD: grader
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U grader -d ghl_bulk_stage_test']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: 'no'
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://grader:grader@postgres:5432/ghl_bulk_stage_test
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'

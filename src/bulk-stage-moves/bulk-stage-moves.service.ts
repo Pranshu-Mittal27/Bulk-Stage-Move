@@ -266,14 +266,56 @@ export class BulkStageMovesService {
             normalizedWorkspaceId,
             filter,
           );
-          const countRows = await transaction.$queryRaw<
-            { matchedCount: string }[]
+          const snapshotRows = await transaction.$queryRaw<
+            { matchedCount: string; insertedCount: string }[]
           >(Prisma.sql`
-            SELECT COUNT(*)::text AS "matchedCount"
-            FROM "Opportunity" AS opportunity
-            WHERE ${Prisma.join(predicates, ' AND ')}
+            WITH matching AS MATERIALIZED (
+              SELECT
+                opportunity."workspaceId",
+                opportunity."id",
+                opportunity."stageId",
+                opportunity."stageVersion"
+              FROM "Opportunity" AS opportunity
+              WHERE ${Prisma.join(predicates, ' AND ')}
+              LIMIT 50001
+            ),
+            matched AS MATERIALIZED (
+              SELECT COUNT(*)::text AS "matchedCount"
+              FROM matching
+            ),
+            inserted AS (
+              INSERT INTO "BulkJobItem" (
+                  "jobId",
+                  "workspaceId",
+                  "opportunityId",
+                  "expectedStageId",
+                  "expectedStageVersion",
+                  "status"
+                )
+                SELECT
+                  ${created.id}::uuid,
+                  matching."workspaceId",
+                  matching."id",
+                  matching."stageId",
+                  matching."stageVersion",
+                  ${BulkJobItemStatus.pending}::"BulkJobItemStatus"
+                FROM matching
+                WHERE (
+                  SELECT "matchedCount"::bigint
+                  FROM matched
+                ) <= 50000
+              )
+              SELECT
+                matched."matchedCount",
+                CASE
+                  WHEN matched."matchedCount"::bigint <= 50000
+                    THEN matched."matchedCount"
+                  ELSE '0'
+                END AS "insertedCount"
+              FROM matched
           `);
-          const matchedCount = BigInt(countRows[0]!.matchedCount);
+          const snapshot = snapshotRows[0]!;
+          const matchedCount = BigInt(snapshot.matchedCount);
           if (matchedCount > BigInt(maximumMatchedOpportunities)) {
             throw new ApiError(
               422,
@@ -283,6 +325,13 @@ export class BulkStageMovesService {
           }
 
           const count = Number(matchedCount);
+          const insertedCount = BigInt(snapshot.insertedCount);
+          if (insertedCount !== matchedCount) {
+            throw new Error(
+              'Bulk job snapshot count did not match the transaction count.',
+            );
+          }
+
           const completedAt = count === 0 ? new Date() : undefined;
           const jobWithCount = await transaction.bulkJob.update({
             where: { id: created.id },
@@ -293,33 +342,6 @@ export class BulkStageMovesService {
                 : {}),
             },
           });
-
-          if (count > 0) {
-            const insertedCount = await transaction.$executeRaw(Prisma.sql`
-              INSERT INTO "BulkJobItem" (
-                "jobId",
-                "workspaceId",
-                "opportunityId",
-                "expectedStageId",
-                "expectedStageVersion",
-                "status"
-              )
-              SELECT
-                ${created.id}::uuid,
-                opportunity."workspaceId",
-                opportunity."id",
-                opportunity."stageId",
-                opportunity."stageVersion",
-                ${BulkJobItemStatus.pending}::"BulkJobItemStatus"
-              FROM "Opportunity" AS opportunity
-              WHERE ${Prisma.join(predicates, ' AND ')}
-            `);
-            if (insertedCount !== count) {
-              throw new Error(
-                'Bulk job snapshot count did not match the transaction count.',
-              );
-            }
-          }
 
           return jobWithCount;
         },
