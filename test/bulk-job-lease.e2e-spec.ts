@@ -18,12 +18,16 @@ describe('Bulk job lease service (e2e)', () => {
   let processing: BulkJobProcessingService;
   let workspaceId: string;
   let stageId: string;
+  const additionalWorkspaceIds: string[] = [];
 
-  async function createJob(): Promise<{ id: string; itemId: bigint }> {
+  async function createJob(
+    jobWorkspaceId = workspaceId,
+    jobStageId = stageId,
+  ): Promise<{ id: string; itemId: bigint }> {
     const opportunity = await prisma.opportunity.create({
       data: {
-        workspaceId,
-        stageId,
+        workspaceId: jobWorkspaceId,
+        stageId: jobStageId,
         name: `Lease e2e ${randomUUID()}`,
         value: '1.0000',
       },
@@ -31,18 +35,18 @@ describe('Bulk job lease service (e2e)', () => {
     });
     const job = await prisma.bulkJob.create({
       data: {
-        workspaceId,
+        workspaceId: jobWorkspaceId,
         idempotencyKey: `lease-e2e-${randomUUID()}`,
         canonicalRequestHash: randomUUID(),
         normalizedRequest: { apiVersion: 1 },
-        targetStageId: stageId,
+        targetStageId: jobStageId,
         matchedCount: 1,
       },
       select: { id: true },
     });
     const item = await prisma.bulkJobItem.create({
       data: {
-        workspaceId,
+        workspaceId: jobWorkspaceId,
         jobId: job.id,
         opportunityId: opportunity.id,
         expectedStageId: opportunity.stageId,
@@ -51,6 +55,25 @@ describe('Bulk job lease service (e2e)', () => {
       select: { itemId: true },
     });
     return { id: job.id, itemId: item.itemId };
+  }
+
+  async function createJobInAnotherWorkspace(): Promise<{
+    workspaceId: string;
+    jobId: string;
+  }> {
+    const workspace = await prisma.workspace.create({
+      data: { name: `Lease e2e ${randomUUID()}` },
+    });
+    additionalWorkspaceIds.push(workspace.id);
+    const stage = await prisma.stage.create({
+      data: {
+        workspaceId: workspace.id,
+        name: 'Lease fixture stage',
+        position: 1,
+      },
+    });
+    const job = await createJob(workspace.id, stage.id);
+    return { workspaceId: workspace.id, jobId: job.id };
   }
 
   async function addPendingItem(jobId: string): Promise<bigint> {
@@ -161,6 +184,30 @@ describe('Bulk job lease service (e2e)', () => {
     await prisma.bulkJobItem.deleteMany({ where: { workspaceId } });
     await prisma.bulkJob.deleteMany({ where: { workspaceId } });
     await prisma.opportunity.deleteMany({ where: { workspaceId } });
+
+    for (const additionalWorkspaceId of additionalWorkspaceIds) {
+      await prisma.opportunityTransition.deleteMany({
+        where: { workspaceId: additionalWorkspaceId },
+      });
+      await prisma.bulkJob.updateMany({
+        where: { workspaceId: additionalWorkspaceId },
+        data: { cursorItemId: null },
+      });
+      await prisma.bulkJobItem.deleteMany({
+        where: { workspaceId: additionalWorkspaceId },
+      });
+      await prisma.bulkJob.deleteMany({
+        where: { workspaceId: additionalWorkspaceId },
+      });
+      await prisma.opportunity.deleteMany({
+        where: { workspaceId: additionalWorkspaceId },
+      });
+      await prisma.stage.deleteMany({
+        where: { workspaceId: additionalWorkspaceId },
+      });
+      await prisma.workspace.delete({ where: { id: additionalWorkspaceId } });
+    }
+    additionalWorkspaceIds.length = 0;
   });
 
   afterAll(async () => {
@@ -902,6 +949,209 @@ describe('Bulk job lease service (e2e)', () => {
     expect(persisted.leaseOwner).toBe(claim.token.leaseOwner);
     expect(persisted.leaseGeneration).toBe(claim.token.leaseGeneration);
     expect(persisted.leaseGeneration).toBe(1);
+  });
+
+  it('allows only one concurrent claimant to claim jobs in a workspace', async () => {
+    const first = await createJob();
+    const second = await createJob();
+
+    const results = await Promise.all([
+      leases.claimNext('worker-one'),
+      leases.claimNext('worker-two'),
+    ]);
+
+    const claims = results.filter((result) => result.kind === 'claimed');
+    const empty = results.filter((result) => result.kind === 'empty');
+    expect(claims).toHaveLength(1);
+    expect(empty).toHaveLength(1);
+    if (claims[0]?.kind !== 'claimed') {
+      throw new Error('Expected exactly one job to be claimed.');
+    }
+    expect([first.id, second.id]).toContain(claims[0].job.id);
+
+    const jobs = await prisma.bulkJob.findMany({
+      where: { id: { in: [first.id, second.id] } },
+      orderBy: { id: 'asc' },
+    });
+    expect(
+      jobs.filter((job) => job.status === BulkJobStatus.running),
+    ).toHaveLength(1);
+    expect(
+      jobs.filter((job) => job.status === BulkJobStatus.queued),
+    ).toHaveLength(1);
+  });
+
+  it('claims a job in another workspace while the first workspace is active', async () => {
+    const firstWorkspaceJob = await createJob();
+    const otherWorkspace = await createJobInAnotherWorkspace();
+
+    const firstClaim = await leases.claimNext('worker-workspace-one');
+    expect(firstClaim.kind).toBe('claimed');
+    if (firstClaim.kind !== 'claimed') {
+      throw new Error('Expected the first workspace job to be claimed.');
+    }
+    expect(firstClaim.job.id).toBe(firstWorkspaceJob.id);
+
+    const otherWorkspaceClaim = await leases.claimNext('worker-workspace-two');
+    expect(otherWorkspaceClaim.kind).toBe('claimed');
+    if (otherWorkspaceClaim.kind !== 'claimed') {
+      throw new Error('Expected the other workspace job to be claimable.');
+    }
+    expect(otherWorkspaceClaim.job.id).toBe(otherWorkspace.jobId);
+    expect(otherWorkspaceClaim.job.workspaceId).toBe(
+      otherWorkspace.workspaceId,
+    );
+  });
+
+  it('does not bypass an expired running job locked by an in-flight batch', async () => {
+    const expired = await createJob();
+    await setExpiredLease(expired.id, 'worker-expired', 7);
+    const queued = await createJob();
+    const queuedJob = await prisma.bulkJob.findUniqueOrThrow({
+      where: { id: queued.id },
+      select: { createdAt: true },
+    });
+    await prisma.bulkJob.update({
+      where: { id: expired.id },
+      data: {
+        lastProgressAt: new Date(queuedJob.createdAt.getTime() - 1_000),
+      },
+    });
+
+    let releaseOtherWorkspaceLocks!: () => void;
+    let signalOtherWorkspaceLocksAcquired!: () => void;
+    let signalOtherWorkspaceLocksFailed!: (error: unknown) => void;
+    const otherWorkspaceLocksReleased = new Promise<void>((resolve) => {
+      releaseOtherWorkspaceLocks = resolve;
+    });
+    const otherWorkspaceLocksAcquired = new Promise<void>((resolve, reject) => {
+      signalOtherWorkspaceLocksAcquired = resolve;
+      signalOtherWorkspaceLocksFailed = reject;
+    });
+    const holdingOtherWorkspaceLocks = prisma
+      .$transaction(async (transaction) => {
+        await transaction.$queryRaw`
+          SELECT "id"
+          FROM "Workspace"
+          WHERE "id" <> ${workspaceId}::uuid
+          FOR NO KEY UPDATE
+        `;
+        signalOtherWorkspaceLocksAcquired();
+        await otherWorkspaceLocksReleased;
+      })
+      .catch((error: unknown) => {
+        signalOtherWorkspaceLocksFailed(error);
+        throw error;
+      });
+
+    let releaseExpiredJobLock!: () => void;
+    let signalExpiredJobLockAcquired!: () => void;
+    let signalExpiredJobLockFailed!: (error: unknown) => void;
+    const expiredJobLockReleased = new Promise<void>((resolve) => {
+      releaseExpiredJobLock = resolve;
+    });
+    const expiredJobLockAcquired = new Promise<void>((resolve, reject) => {
+      signalExpiredJobLockAcquired = resolve;
+      signalExpiredJobLockFailed = reject;
+    });
+    let holdingExpiredJobLock: Promise<void> | undefined;
+    let expiredJobLockSettled = false;
+    let primaryError: unknown;
+    let hasPrimaryError = false;
+    const cleanupErrors: unknown[] = [];
+
+    try {
+      await otherWorkspaceLocksAcquired;
+      holdingExpiredJobLock = prisma
+        .$transaction(async (transaction) => {
+          await transaction.$queryRaw`
+            SELECT "id"
+            FROM "BulkJob"
+            WHERE "id" = ${expired.id}::uuid
+            FOR UPDATE
+          `;
+          signalExpiredJobLockAcquired();
+          await expiredJobLockReleased;
+        })
+        .catch((error: unknown) => {
+          signalExpiredJobLockFailed(error);
+          throw error;
+        });
+      try {
+        await expiredJobLockAcquired;
+        expect(await leases.claimNext('worker-contender')).toEqual({
+          kind: 'empty',
+        });
+        expect(
+          await prisma.bulkJob.findUniqueOrThrow({ where: { id: queued.id } }),
+        ).toMatchObject({
+          status: BulkJobStatus.queued,
+          leaseOwner: null,
+          leaseGeneration: 0,
+        });
+      } finally {
+        releaseExpiredJobLock();
+        if (holdingExpiredJobLock) {
+          const [holderResult] = await Promise.allSettled([
+            holdingExpiredJobLock,
+          ]);
+          expiredJobLockSettled = true;
+          if (holderResult.status === 'rejected') {
+            cleanupErrors.push(holderResult.reason);
+          }
+        }
+      }
+
+      if (cleanupErrors.length === 0) {
+        const reclaimed = await leases.claimNext('worker-reclaimer');
+        expect(reclaimed.kind).toBe('claimed');
+        if (reclaimed.kind !== 'claimed') {
+          throw new Error('Expected the expired job to be reclaimed.');
+        }
+        expect(reclaimed.job).toMatchObject({
+          id: expired.id,
+          status: BulkJobStatus.running,
+          leaseOwner: 'worker-reclaimer',
+          leaseGeneration: 8,
+        });
+      }
+    } catch (error) {
+      primaryError = error;
+      hasPrimaryError = true;
+    } finally {
+      releaseExpiredJobLock();
+      releaseOtherWorkspaceLocks();
+      const holderResults = await Promise.allSettled([
+        holdingOtherWorkspaceLocks,
+        ...(holdingExpiredJobLock && !expiredJobLockSettled
+          ? [holdingExpiredJobLock]
+          : []),
+      ]);
+      for (const result of holderResults) {
+        if (result.status === 'rejected') {
+          cleanupErrors.push(result.reason);
+        }
+      }
+    }
+
+    const distinctCleanupErrors = cleanupErrors.filter(
+      (error) => error !== primaryError,
+    );
+    if (hasPrimaryError && distinctCleanupErrors.length > 0) {
+      throw new AggregateError(
+        [primaryError, ...distinctCleanupErrors],
+        'The test failed and transaction cleanup also failed.',
+      );
+    }
+    if (hasPrimaryError) {
+      throw primaryError;
+    }
+    if (distinctCleanupErrors.length > 0) {
+      throw new AggregateError(
+        distinctCleanupErrors,
+        'Transaction cleanup failed.',
+      );
+    }
   });
 
   it('skips a locked eligible job and claims another eligible job', async () => {

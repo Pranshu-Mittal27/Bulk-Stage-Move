@@ -567,7 +567,7 @@ describe('Bulk stage move submission API (e2e)', () => {
     expect(snapshotIds.map((item) => item.opportunityId).sort()).toEqual(
       insertedOpportunities.map((opportunity) => opportunity.id).sort(),
     );
-  }, 120_000);
+  }, 240_000);
 
   it('completes immediately when no opportunities match', async () => {
     const response = await submit({

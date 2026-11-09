@@ -147,24 +147,143 @@ export class BulkJobLeaseService {
     const leaseOwner = validateWorkerId(workerId);
     const row = await this.prisma.$transaction(
       async (transaction): Promise<ClaimedBulkJobRow | null> => {
-        const candidates = await transaction.$queryRaw<{ id: string }[]>(
+        const workspaceCandidates = await transaction.$queryRaw<
+          { workspaceId: string }[]
+        >(
           Prisma.sql`
+            WITH candidate_time AS MATERIALIZED (
+              SELECT clock_timestamp() AS "now"
+            ),
+            eligible_jobs AS MATERIALIZED (
+              SELECT
+                job."workspaceId",
+                COALESCE(job."lastProgressAt", job."createdAt") AS "sortAt",
+                job."createdAt",
+                job."id"
+              FROM "BulkJob" AS job
+              CROSS JOIN candidate_time
+              WHERE (
+                job."status" = 'queued'::"BulkJobStatus"
+                OR (
+                  job."status" = 'running'::"BulkJobStatus"
+                  AND (
+                    job."leaseExpiresAt" IS NULL
+                    OR job."leaseExpiresAt" <= candidate_time."now"
+                  )
+                )
+              )
+                AND EXISTS (
+                  SELECT 1
+                  FROM "BulkJobItem" AS item
+                  WHERE item."jobId" = job."id"
+                    AND item."status" = 'pending'::"BulkJobItemStatus"
+                    AND (
+                      item."nextAttemptAt" IS NULL
+                      OR item."nextAttemptAt" <= candidate_time."now"
+                    )
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM "BulkJob" AS active_job
+                  WHERE active_job."workspaceId" = job."workspaceId"
+                    AND active_job."status" = 'running'::"BulkJobStatus"
+                    AND active_job."leaseExpiresAt" > candidate_time."now"
+                )
+            ),
+            workspace_candidates AS (
+              SELECT DISTINCT ON (eligible."workspaceId")
+                eligible."workspaceId",
+                eligible."sortAt",
+                eligible."createdAt",
+                eligible."id"
+              FROM eligible_jobs AS eligible
+              ORDER BY
+                eligible."workspaceId",
+                eligible."sortAt",
+                eligible."createdAt",
+                eligible."id"
+            )
+            SELECT candidate."workspaceId" AS "workspaceId"
+            FROM workspace_candidates AS candidate
+            ORDER BY
+              candidate."sortAt",
+              candidate."createdAt",
+              candidate."id"
+          `,
+        );
+
+        for (const { workspaceId } of workspaceCandidates) {
+          const workspaceLocks = await transaction.$queryRaw<
+            { id: string }[]
+          >(Prisma.sql`
+            SELECT "id" AS "id"
+            FROM "Workspace"
+            WHERE "id" = ${workspaceId}::uuid
+            FOR NO KEY UPDATE SKIP LOCKED
+          `);
+          if (!workspaceLocks[0]) {
+            continue;
+          }
+
+          const runningCounts = await transaction.$queryRaw<
+            { runningCount: number }[]
+          >(Prisma.sql`
+            SELECT COUNT(*)::int AS "runningCount"
+            FROM "BulkJob"
+            WHERE "workspaceId" = ${workspaceId}::uuid
+              AND "status" = 'running'::"BulkJobStatus"
+          `);
+          const runningJobs = await transaction.$queryRaw<
+            { id: string }[]
+          >(Prisma.sql`
+            SELECT "id" AS "id"
+            FROM "BulkJob"
+            WHERE "workspaceId" = ${workspaceId}::uuid
+              AND "status" = 'running'::"BulkJobStatus"
+            ORDER BY
+              COALESCE("lastProgressAt", "createdAt") ASC,
+              "createdAt" ASC,
+              "id" ASC
+            FOR UPDATE SKIP LOCKED
+          `);
+          if (runningJobs.length !== runningCounts[0]?.runningCount) {
+            continue;
+          }
+
+          const activeLeases = await transaction.$queryRaw<
+            { active: boolean }[]
+          >(Prisma.sql`
+            SELECT EXISTS (
+              SELECT 1
+              FROM "BulkJob"
+              WHERE "workspaceId" = ${workspaceId}::uuid
+                AND "status" = 'running'::"BulkJobStatus"
+                AND "leaseExpiresAt" > clock_timestamp()
+            ) AS "active"
+          `);
+          if (activeLeases[0]?.active) {
+            continue;
+          }
+
+          const candidates = await transaction.$queryRaw<{ id: string }[]>(
+            Prisma.sql`
             WITH candidate_time AS MATERIALIZED (
               SELECT clock_timestamp() AS "now"
             )
             SELECT job."id" AS "id"
             FROM "BulkJob" AS job
             CROSS JOIN candidate_time
-            WHERE (
-              job."status" = 'queued'::"BulkJobStatus"
-              OR (
-                job."status" = 'running'::"BulkJobStatus"
-                AND (
-                  job."leaseExpiresAt" IS NULL
-                  OR job."leaseExpiresAt" <= candidate_time."now"
+            WHERE job."workspaceId" = ${workspaceId}::uuid
+              AND (
+                job."status" = 'queued'::"BulkJobStatus"
+                OR (
+                  job."status" = 'running'::"BulkJobStatus"
+                  AND (
+                    job."leaseExpiresAt" IS NULL
+                    OR job."leaseExpiresAt" <= candidate_time."now"
+                  )
                 )
               )
-            )
               AND EXISTS (
                 SELECT 1
                 FROM "BulkJobItem" AS item
@@ -182,16 +301,16 @@ export class BulkJobLeaseService {
             LIMIT 1
             FOR UPDATE OF job SKIP LOCKED
           `,
-        );
-        const candidate = candidates[0];
-        if (!candidate) {
-          return null;
-        }
+          );
+          const candidate = candidates[0];
+          if (!candidate) {
+            continue;
+          }
 
-        const eligibility = await transaction.$queryRaw<
-          { eligible: boolean }[]
-        >(
-          Prisma.sql`
+          const eligibility = await transaction.$queryRaw<
+            { eligible: boolean }[]
+          >(
+            Prisma.sql`
             WITH eligibility_time AS MATERIALIZED (
               SELECT clock_timestamp() AS "now"
             )
@@ -222,13 +341,13 @@ export class BulkJobLeaseService {
                 )
             ) AS "eligible"
           `,
-        );
-        if (!eligibility[0]?.eligible) {
-          return null;
-        }
+          );
+          if (!eligibility[0]?.eligible) {
+            continue;
+          }
 
-        const claimed = await transaction.$queryRaw<ClaimedBulkJobRow[]>(
-          Prisma.sql`
+          const claimed = await transaction.$queryRaw<ClaimedBulkJobRow[]>(
+            Prisma.sql`
             WITH claim_time AS MATERIALIZED (
               SELECT clock_timestamp() AS "now"
             )
@@ -274,8 +393,12 @@ export class BulkJobLeaseService {
               job."heartbeatAt" AS "heartbeatAt",
               job."startedAt" AS "startedAt"
           `,
-        );
-        return claimed[0] ?? null;
+          );
+          if (claimed[0]) {
+            return claimed[0];
+          }
+        }
+        return null;
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,

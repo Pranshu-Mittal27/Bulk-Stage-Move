@@ -1,6 +1,7 @@
 {
   "preset": "ts-jest/presets/default-esm",
   "testEnvironment": "node",
+  "maxWorkers": 1,
   "testRegex": ".*\\.e2e-spec\\.ts$",
   "extensionsToTreatAsEsm": [".ts"],
   "moduleNameMapper": {

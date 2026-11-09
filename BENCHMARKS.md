@@ -8,6 +8,8 @@ individual local runs, not statistically controlled repeated experiments. The
 run numbers below identify the primary bulk and crash-recovery evidence
 retained for the final submission.
 
+Scheduling implementation note: Bulk Runs 1 and 2 and Crash Run 1 were collected before the workspace-level claim coordination mechanism was introduced. They provide evidence for bulk-processing throughput, interactive read latency, and crash recovery under the earlier scheduling implementation. They do not measure or validate the performance, fairness, or contention characteristics of the newer one-active-bulk-job-per-workspace policy. No before-and-after performance comparison has been performed for that scheduling change.
+
 | Environment        | Value                                                                                                 |
 | ------------------ | ----------------------------------------------------------------------------------------------------- |
 | OS / shell         | Windows, PowerShell                                                                                   |

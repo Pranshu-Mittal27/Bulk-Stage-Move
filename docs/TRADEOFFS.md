@@ -18,12 +18,12 @@ This document records deliberate scope choices and verified limitations in the t
 
 ## Known limitations and accepted trade-offs
 
-### Basic job yielding does not provide workspace fairness
+### Workspace-level concurrency does not guarantee workspace fairness
 
-- **Current behavior:** A worker yields after at most five completed batches or recorded retry attempts when pending work remains. Empty polls while due rows are locked do not consume the quantum. Eligible jobs are ordered by oldest `lastProgressAt`, falling back to `createdAt`, using `SKIP LOCKED`. This lets older-waiting eligible jobs run before a recently progressed job, but does not weight or partition by workspace.
-- **Impact:** The bounded quantum improves job-level scheduling opportunities but does not guarantee strict fairness or prevent starvation. A busy workspace can still consume worker capacity, and all workers still share database resources with the API.
-- **Why limited:** A small fixed quantum and existing progress timestamp avoid schema and infrastructure changes while preserving the durable lease model. They do not implement a tenant-level scheduling policy.
-- **Possible next-week improvement:** Measure queue wait time by workspace under a representative mixed-workload test, agree on a fairness objective, then evaluate whether workspace-aware scheduling is warranted.
+- **Current behavior:** A worker yields after at most five completed batches or recorded retry attempts when pending work remains. Empty polls while due rows are locked do not consume the quantum. Eligible jobs are ordered by oldest lastProgressAt, falling back to createdAt, using SKIP LOCKED. Job claims also enforce at most one actively leased bulk job per workspace. The claim transaction obtains a short-lived workspace row lock, inspects and locks the workspace's running job rows, checks for active leases, and revalidates the candidate before assigning a lease. The workspace lock is released when the claim transaction completes.
+- **Impact:** This prevents multiple bulk jobs in the same workspace from being actively processed concurrently, while allowing eligible jobs in unrelated workspaces to be claimed independently. However, it does not guarantee strict fairness, round-robin scheduling, or prevent starvation. A busy workspace can still consume one worker's capacity and shared database resources. API traffic and workers continue to share PostgreSQL resources.
+- **Why limited:** The workspace-level claim coordination adds a concurrency boundary without introducing a separate scheduler, queue partitioning, or additional infrastructure. The workspace lock is intentionally short-lived; it does not reserve database resources throughout job execution.
+- **Possible next-week improvement:** Measure queue wait time by workspace under representative mixed workloads. Test competing jobs in the same workspace and across different workspaces, including claim-lock contention and lease renewal. Define a fairness objective from those results before considering workspace-weighted scheduling or other changes.
 
 ### Due work can cause polling when its item rows remain locked
 
@@ -48,15 +48,15 @@ This document records deliberate scope choices and verified limitations in the t
 
 ### Production-scale behavior remains unverified
 
-- **Current behavior:** The repository includes the `benchmark:bulk` command and a reproducible benchmark harness. The latest local 50,000-item bulk and operator-attested crash/recovery runs are documented in `BENCHMARKS.md`; no baseline and during-bulk result pair is included in the current final report. Adding baseline comparisons remains future work.
+- **Current behavior:** The repository includes the `benchmark:bulk` command and a reproducible benchmark harness. The latest local 50,000-item bulk and operator-attested crash/recovery runs are documented in `BENCHMARKS.md`; no baseline and during-bulk result pair is included in the current final report. Adding baseline comparisons remains future work. The recorded benchmark runs predate the workspace-level claim coordination change, so the new scheduling policy has not yet been benchmarked or compared against the previous implementation.
 - **Impact:** These single local runs provide observed persisted end-to-end throughput and interactive latency for the tested workload. They do not establish isolated worker processing rate, production-scale capacity, performance at larger data volumes, or a stable causal estimate of bulk work's latency impact. Database contention and bottlenecks remain unverified.
 - **Why deferred:** Correctness and transaction behavior were established first. The initial local measurements are not repeated or representative-environment evidence for production performance claims.
 - **Possible next-week improvement:** Repeat the documented scenarios and test representative mixed/higher-load workloads in a representative environment; record hardware and configuration, and inspect contention before tuning or making capacity claims.
 
-### One active job per worker process and fixed batch size
+### One active job per worker process, one active bulk job per workspace
 
-- **Current behavior:** Each worker process claims one job and processes up to five completed batches or recorded retry attempts before yielding pending work. Batch size is fixed for that process through `BULK_JOB_BATCH_SIZE` (default 100, bounded from 1 to 500). Multiple worker processes can run concurrently.
-- **Impact:** Yielding gives other eligible jobs an opportunity to run, but does not reserve database capacity for API traffic or guarantee interactive latency. The chosen batch size and quantum are not automatically adjusted to database load or job size.
+- **Current behavior:** Each worker process claims one job and processes up to five completed batches or recorded retry attempts before yielding pending work. Batch size is configured per process through BULK_JOB_BATCH_SIZE (default 100, bounded from 1 to 500). Multiple worker processes can run concurrently, but workspace-level claim coordination prevents another job from being claimed while the workspace has an active lease or a running job that cannot safely be inspected during an in-flight batch.
+- **Impact:** Yielding gives other eligible jobs an opportunity to run, and workspace-level concurrency control prevents multiple bulk jobs in the same workspace from executing concurrently. However, neither mechanism reserves database capacity for API traffic or guarantees interactive latency. The chosen batch size and quantum are not automatically adjusted to database load or job size.
 - **Why limited:** Sequential processing with a fixed, bounded quantum keeps transactions and worker logic understandable while allowing deployment-time batch sizing and multiple worker processes.
 - **Possible next-week improvement:** Benchmark representative job sizes and worker counts, inspect database contention and latency, then tune the batch size or process count based on measured results.
 
